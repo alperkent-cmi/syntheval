@@ -124,16 +124,14 @@ class PrincipalComponentAnalysis(MetricClass):
 
             return self.results
 
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |"""
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
         if self.results != {}:
-            string = """\
-| PCA difference in eigenvalues (exp. var.):   %.4f           |
-| PCA angle diff. between eigenvectors     :   %.4f           |""" % (self.results['exp_var_diff'], 
-                                                                      self.results['comp_angle_diff'])
-            return string
+            rows =[
+                ("utility", "PCA difference in eigenvalues (exp. var.)", self.results['exp_var_diff'], None),
+                ("utility", "PCA angle diff. between eigenvectors", self.results['comp_angle_diff'], None),
+            ]
+            return rows
         else: pass
 
     def normalize_output(self) -> list:

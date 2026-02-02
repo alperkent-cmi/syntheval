@@ -132,11 +132,9 @@ class MetricClassName(MetricClass):
 
             self.results = {'model': model, 'auroc_diff': roc_auc_mean_fake - roc_auc_mean_real}
             return self.results
-
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |"""
+        
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
         try:
             assert self.analysis_target is not None
             assert len(pd.unique(self.real_data[self.analysis_target])) == 2
@@ -145,9 +143,24 @@ class MetricClassName(MetricClass):
         except AssertionError:
             pass
         else:
-            string = """\
-| prediction AUROC difference (%7s)    :   %.4f           |""" % (self.results['model'], self.results['auroc_diff'])
-            return string
+            row = ("utility", "prediction AUROC difference (%7s)" % (self.results['model']), self.results['auroc_diff'], None),
+            return [row]
+    
+#     def format_output(self) -> str:
+#         """ Return string for formatting the output, when the
+#         metric is part of SynthEval. 
+# |                                          :                    |"""
+#         try:
+#             assert self.analysis_target is not None
+#             assert len(pd.unique(self.real_data[self.analysis_target])) == 2
+#             assert len(pd.unique(self.synt_data[self.analysis_target])) == 2
+#             assert self.hout_data is not None
+#         except AssertionError:
+#             pass
+#         else:
+#             string = """\
+# | prediction AUROC difference (%7s)    :   %.4f           |""" % (self.results['model'], self.results['auroc_diff'])
+#             return string
 
     def normalize_output(self) -> list:
         """ This function is for making a dictionary of the most quintessential

@@ -66,14 +66,11 @@ class MetricClassName(MetricClass):
             self.results = {'avg': np.mean(abs(means_diff)), 'err': np.sqrt(sum(diff_error**2))/len(diff_error)}
             return self.results
 
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |"""
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
         if self.results != {}:
-            string = """\
-| Average dimensionwise means diff. (nums) :   %.4f  %.4f   |""" % (self.results['avg'], self.results['err'])
-            return string
+            row = ('utility', "Avg. dimensionwise means diff. (nums)", self.results['avg'], self.results['err'])
+            return [row]
         else: pass
 
     def normalize_output(self) -> list:

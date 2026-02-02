@@ -92,13 +92,11 @@ class HellingerDistance(MetricClass):
         self.results = {'avg': np.mean(H_dist), 'err': np.std(H_dist,ddof=1)/np.sqrt(len(H_dist))}
         return self.results
 
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval.        
-        """
-        string = """\
-| Average empirical Hellinger distance     :   %.4f  %.4f   |""" % (self.results['avg'], self.results['err'])
-        return string
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
+        row = ('utility', 'Average empirical Hellinger distance', 
+               self.results['avg'], self.results['err'])
+        return [row]
 
     def normalize_output(self) -> list:
         """ This function is for making a dictionary of the most quintessential

@@ -134,6 +134,7 @@ class ClassificationAccuracy(MetricClass):
             {'rf': ...
         """
         try:
+            #BUG: these are not raised through the rich interface
             assert self.analysis_target is not None, "SynthEval(cls_acc): Analysis target variable not set!"
             assert self.analysis_target in self.cat_cols, "SynthEval(cls_acc): Analysis target variable not categorical!"
             assert len(self.synt_data[self.analysis_target].unique()) >= 2, "SynthEval(cls_acc): Synthetic label column has less than 2 unique values!"
@@ -205,49 +206,88 @@ class ClassificationAccuracy(MetricClass):
                 self.results['avg diff err hout'] = np.std(holdout_diff,ddof=1)/len(cls_models)
 
             return self.results
-        
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |"""
+    
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
+        averages_str = "Averages"
         if self.results != {}:
-            avgs = self.class_avg
-            string = """\
-+---------------------------------------------------------------+
-
-Classification accuracy test     
-avg. of %d-fold cross val.:
-classifier model             acc_rr  acc_fr    diff   error
-+---------------------------------------------------------------+
-""" % self.k_folds
+            rows = [('prediction', 'Accuracy Diff. (%d-fold cross val.)' % (self.k_folds), "", "")]
             for model in self.models:
                 mod_dict = self.results[model]
-                string += f"""\
-| {model_name_dict[model]:<23} :   {mod_dict['rr_val_acc']:.4f}  {mod_dict['fr_val_acc']:.4f}  {mod_dict['fr_val_acc']-mod_dict['rr_val_acc']:>7.4f}  {np.sqrt(mod_dict['rr_val_err']**2+mod_dict['fr_val_err']**2):.4f}   |
-"""
-            string += f"""\
-+---------------------------------------------------------------+
-| Average                 :   {np.mean(avgs[0,:]):.4f}  {np.mean(avgs[1,:]):.4f}  {self.results['avg diff']:>7.4f}  {self.results['avg diff err']:.4f}   |
-"""
+                rows.append((
+                    "prediction",
+                    f"{model_name_dict[model]:<23} | RR {mod_dict['rr_val_acc']:.2f} | FR {mod_dict['fr_val_acc']:.2f}",
+                        mod_dict['fr_val_acc'] - mod_dict['rr_val_acc'],
+                        np.sqrt(mod_dict['rr_val_err']**2 + mod_dict['fr_val_err']**2)
+                ))
+            if (len(self.models) > 1):
+                rows.append((
+                    "prediction",
+                    f"{averages_str:<23} | RR {np.mean(self.class_avg[0,:]):.2f} | FR {np.mean(self.class_avg[1,:]):.2f}",
+                    self.results['avg diff'],
+                    self.results['avg diff err']
+                ))
             if (self.hout_data is not None):
-                hdiff = self.holdout_res[1,:]-self.holdout_res[0,:]
-                string += """\
-+---------------------------------------------------------------+
-
-hold out data results:
-+---------------------------------------------------------------+
-"""
+                rows.append(('prediction', 'Holdout Data Results', "", ""))
                 for i, model in enumerate(self.models):
                     mod_dict = self.results[model]
-                    string += f"""\
-| {model_name_dict[model]:<23} :   {mod_dict['rr_test_acc']:.4f}  {mod_dict['fr_test_acc']:.4f}  {hdiff[i]:>7.4f}           |
-"""
-                string += f"""\
-+---------------------------------------------------------------+
-| Average                 :   {np.mean(self.holdout_res[0,:]):.4f}  {np.mean(self.holdout_res[1,:]):.4f}  {self.results['avg diff hout']:>7.4f}  {self.results['avg diff err hout']:.4f}   |
-"""
-            return string
-        else: pass
+                    rows.append((
+                        "prediction",
+                        f"{model_name_dict[model]:<23} | RR {mod_dict['rr_test_acc']:.2f} | FR {mod_dict['fr_test_acc']:.2f}",
+                            mod_dict['fr_test_acc'] - mod_dict['rr_test_acc'],
+                            None,
+                    ))
+                if (len(self.models) > 1):
+                    rows.append((
+                        "prediction",
+                        f"{averages_str:<23} | RR {np.mean(self.holdout_res[0,:]):.2f} | FR {np.mean(self.holdout_res[1,:]):.2f}",
+                        self.results['avg diff hout'],
+                        self.results['avg diff err hout']
+                    ))
+            return rows
+
+#     def format_output(self) -> str:
+#         """ Return string for formatting the output, when the
+#         metric is part of SynthEval. 
+# |                                          :                    |"""
+#         if self.results != {}:
+#             avgs = self.class_avg
+#             string = """\
+# +---------------------------------------------------------------+
+
+# Classification accuracy test     
+# avg. of %d-fold cross val.:
+# classifier model             acc_rr  acc_fr    diff   error
+# +---------------------------------------------------------------+
+# """ % self.k_folds
+#             for model in self.models:
+#                 mod_dict = self.results[model]
+#                 string += f"""\
+# | {model_name_dict[model]:<23} :   {mod_dict['rr_val_acc']:.4f}  {mod_dict['fr_val_acc']:.4f}  {mod_dict['fr_val_acc']-mod_dict['rr_val_acc']:>7.4f}  {np.sqrt(mod_dict['rr_val_err']**2+mod_dict['fr_val_err']**2):.4f}   |
+# """
+#             string += f"""\
+# +---------------------------------------------------------------+
+# | Average                 :   {np.mean(avgs[0,:]):.4f}  {np.mean(avgs[1,:]):.4f}  {self.results['avg diff']:>7.4f}  {self.results['avg diff err']:.4f}   |
+# """
+#             if (self.hout_data is not None):
+#                 hdiff = self.holdout_res[1,:]-self.holdout_res[0,:]
+#                 string += """\
+# +---------------------------------------------------------------+
+
+# hold out data results:
+# +---------------------------------------------------------------+
+# """
+#                 for i, model in enumerate(self.models):
+#                     mod_dict = self.results[model]
+#                     string += f"""\
+# | {model_name_dict[model]:<23} :   {mod_dict['rr_test_acc']:.4f}  {mod_dict['fr_test_acc']:.4f}  {hdiff[i]:>7.4f}           |
+# """
+#                 string += f"""\
+# +---------------------------------------------------------------+
+# | Average                 :   {np.mean(self.holdout_res[0,:]):.4f}  {np.mean(self.holdout_res[1,:]):.4f}  {self.results['avg diff hout']:>7.4f}  {self.results['avg diff err hout']:.4f}   |
+# """
+#             return string
+#         else: pass
 
     def normalize_output(self) -> list:
         """ This function is for making a dictionary of the most quintessential

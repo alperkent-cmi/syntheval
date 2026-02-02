@@ -71,13 +71,10 @@ class MutualInformation(MetricClass):
         self.results = {'mutual_inf_diff': np.linalg.norm(mi_mat, ord='fro'),'mi_mat_dims': len(mi_mat)}
         return self.results
 
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval.        
-        """
-        string = """\
-| Pairwise mutual information difference   :   %.4f           |""" % (self.results['mutual_inf_diff'])
-        return string
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
+        row = [('utility','Pairwise mutual information difference', f"{self.results['mutual_inf_diff']:.4f}", None)]
+        return row
 
     def normalize_output(self) -> list:
         """ This function is for making a dictionary of the most quintessential

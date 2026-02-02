@@ -7,6 +7,7 @@ import numpy as np
 from syntheval.metrics.core.metric import MetricClass
 
 from syntheval.utils.nn_distance import _knn_distance
+from syntheval.utils.console_output import format_metric_string
 
 def _adversarial_score(real, fake, cat_cols, metric):
     """Function for calculating adversarial score
@@ -127,13 +128,19 @@ class NearestNeighbourAdversarialAccuracy(MetricClass):
 
         return self.results
 
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |"""
-        string = """\
-| Nearest neighbour adversarial accuracy   :   %.4f  %.4f   |""" % (self.results['avg'], self.results['err'])
-        return string
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
+        rows = []
+        rows.append(("utility",
+                    "Nearest neighbour adversarial accuracy", 
+                    f"{self.results['avg']:.4f}", 
+                    f"{self.results['err']:.4f}"))
+        if (self.results != {} and self.hout_data is not None):
+            rows.append(("privacy",
+                        "Privacy loss (diff. in NNAA)", 
+                         f"{self.results['priv_loss']:.4f}", 
+                         f"{self.results['priv_loss_err']:.4f}"))
+        return rows
 
     def normalize_output(self) -> list:
         """ This function is for making a dictionary of the most quintessential
@@ -159,12 +166,4 @@ class NearestNeighbourAdversarialAccuracy(MetricClass):
                         'n_err': self.results['priv_loss_err'], 
                         }])
             return output
-        else: pass
-
-    def extra_formatted_output(self) -> dict:
-        """Bit for printing the privacy loss together with the other privacy metrics"""
-        if (self.results != {} and self.hout_data is not None):
-            string = """\
-| Privacy loss (diff. in NNAA)             :   %.4f  %.4f   |""" % (self.results['priv_loss'], self.results['priv_loss_err'])
-            return {'privacy': string}
         else: pass

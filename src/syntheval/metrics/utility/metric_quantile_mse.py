@@ -80,17 +80,12 @@ class MetricClassName(MetricClass):
                             }
             return self.results
 
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |"""
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
         if self.results != {}:
-            string = """\
-| Quantile mean squared error (qMSE)       :   %.4f  %.4f   |""" % (
-            self.results['avg qMSE'],
-            self.results['qMSE err'],
-            )
-            return string
+            row = ('utility', 'Quantile mean squared error (qMSE)', 
+                   self.results['avg qMSE'], self.results['qMSE err'])
+            return [row]
         else: pass
 
     def normalize_output(self) -> list:

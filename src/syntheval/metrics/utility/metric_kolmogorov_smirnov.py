@@ -131,28 +131,40 @@ class KolmogorovSmirnovTest(MetricClass):
 
         if (self.verbose and sig_cols != []): plot_significantly_dissimilar_variables(self.real_data, self.synt_data, sig_cols, self.cat_cols)
         return self.results
-
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |"""
-        R = self.results
-        if self.results != {}:
-            string = """\
-| Kolmogorov–Smirnov / Total Variation Distance test            |
-|   -> average combined statistic          :   %.4f  %.4f   |
-|       -> avg. Kolmogorov–Smirnov dist.   :   %.4f  %.4f   |
-|       -> avg. Total Variation Distance   :   %.4f  %.4f   |
-|   -> average combined p-value            :   %.4f  %.4f   |
-|       -> # significant tests at a=%.2f   :   %2d               |
-|       -> fraction of significant tests   :   %.4f           |""" % (R['avg stat'], R['stat err'],
-                                                                      R['avg ks'], R['ks err'],
-                                                                      R['avg tvd'], R['tvd err'],
-                                                                      R['avg pval'], R['pval err'], 
-                                                                      self.sig_lvl, R['num sigs'],
-                                                                      R['frac sigs'])
-            return string
-        else: pass
+    
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
+        rows = [
+            ("utility", "General Kolmogorov–Smirnov Statistic", self.results['avg stat'], self.results['stat err']),
+            ("utility", "  -> Avg. Kolmogorov–Smirnov dist.", self.results['avg ks'], self.results['ks err']),
+            ("utility", "  -> Avg. Total Variation Distance", self.results['avg tvd'], self.results['tvd err']),
+            ("utility", "Fraction of Significant KS Tests", self.results['frac sigs'], None),
+            ("utility", f"  -> # of Significant Tests at a={self.sig_lvl:.2f}", self.results['num sigs'], None),
+            ("utility", f"  -> Avg. combined p-value", self.results['avg pval'], self.results['pval err']),
+        ]
+        return rows
+    
+#     def format_output(self) -> str:
+#         """ Return string for formatting the output, when the
+#         metric is part of SynthEval. 
+# |                                          :                    |"""
+#         R = self.results
+#         if self.results != {}:
+#             string = """\
+# | Kolmogorov–Smirnov / Total Variation Distance test            |
+# |   -> average combined statistic          :   %.4f  %.4f   |
+# |       -> avg. Kolmogorov–Smirnov dist.   :   %.4f  %.4f   |
+# |       -> avg. Total Variation Distance   :   %.4f  %.4f   |
+# |   -> average combined p-value            :   %.4f  %.4f   |
+# |       -> # significant tests at a=%.2f   :   %2d               |
+# |       -> fraction of significant tests   :   %.4f           |""" % (R['avg stat'], R['stat err'],
+#                                                                       R['avg ks'], R['ks err'],
+#                                                                       R['avg tvd'], R['tvd err'],
+#                                                                       R['avg pval'], R['pval err'], 
+#                                                                       self.sig_lvl, R['num sigs'],
+#                                                                       R['frac sigs'])
+#             return string
+#         else: pass
 
     def normalize_output(self) -> list:
         """ This function is for making a dictionary of the most quintessential

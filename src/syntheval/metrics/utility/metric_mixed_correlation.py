@@ -176,17 +176,13 @@ class MixedCorrelation(MetricClass):
         if return_mats: self.results['diff_cor_mat'] = corr_mat
         return self.results
 
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |"""
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
         if self.mixed_corr:
-            string = """\
-| Mixed correlation matrix difference      :   %.4f           |""" % (self.results['corr_mat_diff'])
+            row = [('utility','Mixed correlation matrix difference', self.results['corr_mat_diff'], None)]
         else:
-            string = """\
-| Correlation difference (nums only)       :   %.4f           |""" % (self.results['corr_mat_diff'])
-        return string
+            row = [('utility','Correlation difference (nums only)', self.results['corr_mat_diff'], None)]
+        return row
 
     def normalize_output(self) -> list:
         """ This function is for making a dictionary of the most quintessential

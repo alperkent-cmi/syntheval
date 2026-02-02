@@ -10,7 +10,6 @@ from lightgbm import LGBMClassifier
 from sklearn.metrics import precision_score, recall_score, f1_score
 from sklearn.model_selection import train_test_split
 
-
 class MIAClassifier(MetricClass):
     """The Metric Class is an abstract class that interfaces with
     SynthEval. When initialised the class has the following attributes:
@@ -156,27 +155,27 @@ class MIAClassifier(MetricClass):
 
             return self.results
 
-    def format_output(self) -> str:
-        """Return string for formatting the output, when the
-                metric is part of SynthEval.
-        |                                          :                    |"""
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
         try:
             assert self.hout_data is not None
         except AssertionError:
             pass
         else:
-            string = """\
-| Membership inference attack Classifier F1:   %.4f  %.4f   |
-|   -> Precision                           :   %.4f  %.4f   |
-|   -> Recall                              :   %.4f  %.4f   |""" % (
+            rows = [("privacy",
+                "Membership inference attack Classifier F1",
                 self.results["MIA macro F1"],
-                self.results["MIA macro F1 se"],
+                self.results["MIA macro F1 se"]),
+            ("privacy",
+                " -> Precision",
                 self.results["MIA precision"],
-                self.results["MIA precision se"],
+                self.results["MIA precision se"]),
+            ("privacy",
+                " -> Recall",
                 self.results["MIA recall"],
-                self.results["MIA recall se"],
-            )
-            return string
+                self.results["MIA recall se"])
+            ]
+            return rows
 
     def normalize_output(self) -> list:
         """This function is for making a dictionary of the most quintessential

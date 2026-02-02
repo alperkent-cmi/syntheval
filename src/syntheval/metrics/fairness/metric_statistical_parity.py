@@ -151,16 +151,10 @@ class StatisticalParity(MetricClass):
 
         return self.results
 
-    def format_output(self) -> str:
-        """Return string for formatting the output, when the
-                metric is part of SynthEval.
-        |                                          :                    |"""
-        string = format_metric_string(
-            "Statistical Parity difference",
-            self.results["statistical_parity"],
-            self.results["statistical_parity se"],
-        )
-        return string
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
+        rows = ('fairness', "Statistical Parity difference", self.results["statistical_parity"], self.results["statistical_parity se"])
+        return [rows]
 
     def normalize_output(self) -> list:
         """This function is for making a dictionary of the most quintessential
