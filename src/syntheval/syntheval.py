@@ -1,5 +1,5 @@
 # Description: Script for hosting the main framework
-# Author: Anton D. Lautrup
+# Author: Anton D. Lautrup & T. Hyrup
 # Date: 16-08-2023
 
 import os
@@ -10,18 +10,20 @@ import time
 import traceback
 
 import pandas as pd
-from tqdm import tqdm
+from rich.live import Live
 from typing import Literal, List, Dict
 from pandas import DataFrame
 
+import concurrent.futures
+from concurrent.futures import TimeoutError
+
 from .metrics import load_metrics
-from .utils.console_output import print_results_to_console
+from .utils.rich_console import RichConsole
 from .utils.preprocessing import consistent_label_encoding
 from .utils.postprocessing import extremes_ranking, linear_ranking, quantile_ranking, summation_ranking
 from .utils.variable_detection import get_cat_variables
 
 loaded_metrics = load_metrics()
-#print(loaded_metrics)
 
 def _has_not_slash_backslash_or_dot(input_string):
     return not ('/' in input_string or '\\' in input_string or '.' in input_string)
@@ -48,6 +50,7 @@ class SynthEval():
                  nn_distance: Literal['gower', 'euclid', 'EXPERIMENTAL_gower'] = 'gower', 
                  unique_threshold: int = 10,
                  verbose: bool = True,
+                 timeout: int|None = None
         ) -> None:
         """Primary object for accessing the SynthEval evaluation framework. Create with the real data used for training 
         and use either evaluate of benchmark methods for evaluating synthetic datasets.
@@ -59,10 +62,12 @@ class SynthEval():
             nn_distance         : {default= 'gower', 'euclid', 'EXPERIMENTAL_gower'} distance metric for NN distances.
             unique_threshold    : threshold of unique levels in non-object columns to be considered categoricals.    
             verbose             : flag fo printing to console and making figures.
+            timeout             : (optional) time limit for each metric in seconds.
         """
 
         self.real = real_dataframe
         self.verbose = verbose
+        self.timeout = timeout
 
         if holdout_dataframe is not None:
             # Make sure columns and their order are the same.
@@ -73,7 +78,7 @@ class SynthEval():
             self.hold_out = holdout_dataframe
         else:
             self.hold_out = None
-
+        
         if cat_cols is None:
             cat_cols = get_cat_variables(real_dataframe, unique_threshold)
             if self.verbose:
@@ -92,7 +97,8 @@ class SynthEval():
         if len(self.real.columns) == len(synt.columns):
             synt = synt[self.real.columns.tolist()]
         assert self.real.columns.tolist() == synt.columns.tolist(), 'Columns in real and synthetic dataframe are not the same'
-        if self.verbose: print('SynthEval: synthetic data read successfully')
+        if self.verbose: 
+            print('SynthEval: synthetic data read successfully')
         pass
 
     def display_loaded_metrics(self):
@@ -144,60 +150,106 @@ class SynthEval():
         if self.hold_out is not None: hout_data = CLE.encode(self.hold_out)
         else: hout_data = None
 
-        utility_output_txt = ''
-        privacy_output_txt = ''
-        fairness_output_txt = ''
-
         methods = evaluation_config.keys()
 
-        raw_results = {}
-        key_results = None
-        pbar = tqdm(methods, disable= not self.verbose)
-        for method in pbar:
-            pbar.set_description(f'Syntheval: {method}')
+        methods_loaded = []
+        for method in methods:
             if method not in loaded_metrics.keys():
                 print(f"Unrecognised keyword: {method}")
                 continue
+            else:
+                methods_loaded.append(method)
+        method_types = [loaded_metrics[method].type() for method in methods_loaded]
+        methods_sorted = [x for _, x in sorted(zip(method_types, methods_loaded))]
+
+        raw_results = {}
+        key_results = None
+
+        def evaluate_method(method):
             try:
-                #TODO: Add object manager to increase efficiency by reusing nn distances and trained classification models between metrics. 
-                M = loaded_metrics[method](real_data, synt_data, hout_data, self.categorical_columns, self.numerical_columns, self.nn_dist, analysis_target_var, do_preprocessing=CLE, verbose=self.verbose)
-                raw_results[method] = M.evaluate(**evaluation_config[method])
+                M = loaded_metrics[method](
+                    real_data, synt_data, hout_data, self.categorical_columns,
+                    self.numerical_columns, self.nn_dist, analysis_target_var,
+                    do_preprocessing=CLE, verbose=self.verbose
+                )
+                raw_result = M.evaluate(**evaluation_config[method])
+                rich_rows = M.format_output()
+                key_result = M.normalize_output()
+                return method, raw_result, key_result, rich_rows, None
             except Exception as e:
-                print(f"{method} failed to run. Exception: {e}")
-                continue
+                return method, None, None, None, str(e)
 
-            string       = M.format_output()
-            extra_string = M.extra_formatted_output()
+        if self.verbose:
+            co = RichConsole(methods_loaded)
+            output_screen = co.output
+            console = co.console
+            error_counter = 0
+            with Live(output_screen, console=console, refresh_per_second=4, transient=False, screen=True, vertical_overflow="visible") as live:
+                console.show_cursor(True)
 
-            if string is not None:
-                match loaded_metrics[method].type():
-                    case 'utility':
-                        utility_output_txt += string + '\n'
-                    case 'privacy':
-                        privacy_output_txt += string + '\n'
-                    case 'fairness':
-                        fairness_output_txt += string + '\n'
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future_to_method = {
+                        executor.submit(evaluate_method, method): method
+                        for method in methods_loaded
+                    }
+                
+                    for future in concurrent.futures.as_completed(future_to_method):
+                        method = future_to_method[future]
+                        try:
+                            method, raw_result, key_result, rich_rows, error = future.result(timeout=self.timeout)
+                            if error:
+                                raise Exception(error)
+                            raw_results[method] = raw_result
+                            if key_result is None:
+                                key_results = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
+                            else:
+                                tmp_df = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
+                                key_results = pd.concat((key_results, tmp_df), axis = 0).reset_index(drop=True)
 
-            # TODO: Get rid of the extra_formatted_output thing by using this method instead.
-            if extra_string is not None:
-                for key in extra_string.keys():
-                    match key:
-                        case 'utility':
-                            utility_output_txt += extra_string[key] + '\n'
-                        case 'privacy':
-                            privacy_output_txt += extra_string[key] + '\n'
-                        case 'fairness':
-                            fairness_output_txt += extra_string[key] + '\n'
-        
-            normalized_result = M.normalize_output()
-            if normalized_result is not None: 
-                if key_results is None:
-                    key_results = pd.DataFrame(M.normalize_output(), columns=['metric', 'dim', 'val','err','n_val','n_err'])
-                else:
-                    tmp_df = pd.DataFrame(M.normalize_output(), columns=['metric', 'dim', 'val','err','n_val','n_err'])
-                    key_results = pd.concat((key_results, tmp_df), axis = 0).reset_index(drop=True)
+                            if rich_rows is not None:
+                                co.update_result_table_rows(method, rich_rows)
+                            co.update_runtime_table(method, f"[bold green]V[/bold green]")
 
-        if self.verbose: print_results_to_console(utility_output_txt, privacy_output_txt, fairness_output_txt)
+                        except TimeoutError:
+                            error_counter += 1
+                            live.console.print(f"{method} timed out after {self.timeout} seconds.")
+                            co.add_error_message(message=f"{method} timed out after {self.timeout} seconds.\n")
+                            co.update_runtime_table(method, f"[bold yellow]T[/bold yellow]")
+                            continue
+                        except Exception as e:
+                            error_counter += 1
+                            live.console.print(f"{method} failed to run. excpetion: {e}")
+                            error_message = traceback.format_exc()
+                            co.add_error_message(message=error_message)
+                            co.update_runtime_table(method, f"[bold red]X[/bold red]")
+                            continue
+                        finally:
+                            live.update(output_screen)
+
+            co.hide_runtime_table(trigger = error_counter == 0)
+            console.print(output_screen)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future_to_method = {
+                    executor.submit(evaluate_method, method): method
+                    for method in methods_loaded
+                }
+
+                for future in concurrent.futures.as_completed(future_to_method):
+                    method = future_to_method[future]
+                    try:
+                        method, raw_result, key_result, _, error = future.result(timeout=self.timeout)
+                        if error:
+                            raise Exception(error)
+                        raw_results[method] = raw_result
+                        if key_result is None:
+                            key_results = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
+                        else:
+                            tmp_df = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
+                            key_results = pd.concat((key_results, tmp_df), axis = 0).reset_index(drop=True)
+                    except Exception as e:
+                        print(f"{method} failed to run. excpetion: {e}")
+                        continue
 
         # Save non-standard evaluation config to a json file
         if (kwargs != {} and self.verbose):
@@ -230,7 +282,7 @@ class SynthEval():
             >>> isinstance(res, pd.DataFrame)
             True
         """
-
+        # TODO: integrate the rich console with this method as well.
         # Part to avoid printing in the following and resetting to user preference after
         verbose_flag = False
         if self.verbose == True:
@@ -298,9 +350,12 @@ class SynthEval():
         comb_df.columns = pd.MultiIndex.from_tuples(comb_df.columns)
 
         comb_df['rank'] = rank_df['rank']
-        comb_df['u_rank'] = rank_df['u_rank']
-        comb_df['p_rank'] = rank_df['p_rank']
-        comb_df['f_rank'] = rank_df['f_rank']
+        if utility_mets != []:
+            comb_df['u_rank'] = rank_df['u_rank']
+        if privacy_mets != []:
+            comb_df['p_rank'] = rank_df['p_rank']
+        if fairness_mets != []:
+            comb_df['f_rank'] = rank_df['f_rank']
 
         name_tag = str(int(time.time()))
         temp_df = comb_df.copy()
