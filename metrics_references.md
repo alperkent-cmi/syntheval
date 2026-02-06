@@ -27,3 +27,19 @@ where $x_j$ is the estimated probability in each of the $N_{quant}$ quantiles. T
 
 Reference:
 > Butter, A., Diefenbacher, S., Kasieczka, G., Nachman, B., & Plehn, T. (2021). GANplifying event samples. SciPost Physics, 10(6), 139. [10.21468/SciPostPhys.10.6.139](https://doi.org/10.21468/SciPostPhys.10.6.139)
+
+### Maximum Mean Discrepancy (MMD)
+MMD is a kernel-based distance measure between two distributions (in our case the real and synthetic data sets). It comes in two flavors: the biased V-statistic and the unbiased U-statistic. The biased V-statistic is calculated as follows:
+$$
+\text{MMD}_b^2 = \frac{1}{n^2} \sum_{i,j} k(x_i, x_j) + \frac{1}{m^2} \sum_{i,j} k(y_i, y_j) - \frac{2}{nm} \sum_{i,j} k(x_i, y_j),
+$$
+where $k$ is a kernel function, and $x_i$ and $y_j$ are samples from the two distributions. The unbiased U-statistic is calculated as follows:
+$$
+\text{MMD}_u^2 = \frac{1}{n(n-1)} \sum_{i \neq j} k(x_i, x_j) + \frac{1}{m(m-1)} \sum_{i \neq j} k(y_i, y_j) - \frac{2}{nm} \sum_{i,j} k(x_i, y_j),
+$$
+where the sums are taken over all pairs of samples, excluding the diagonal terms. Both measures can be negative at finite sample sizes due to variance, so it is clipped at $0$ for stability, i.e., $\max(MMD^2,0)$. A lower value of MMD indicates that the two distributions are similar (yet negative values cannot be compared by magnitude). 
+
+As a test statistic, MMD can be used to perform a two-sample test to determine if the two distributions are significantly different. In this case, a value higher than some threshold (determined by the distribution of MMD under the null hypothesis) would indicate that the two distributions are significantly different. In the context of synthetic data evaluation, a low MMD value would indicate that the synthetic data is not unreasonably different.
+
+Reference:
+> Gretton, A., Borgwardt, K.M., Rasch, M.J., Smola, A., Schölkopf, B., & Smola, A. (2012). A Kernel Two-Sample Test. Journal of Machine Learning Research, 13(25), 723–773. [http://jmlr.org/papers/v13/gretton12a.html](http://jmlr.org/papers/v13/gretton12a.html)
