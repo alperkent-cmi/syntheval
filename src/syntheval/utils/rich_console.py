@@ -28,6 +28,7 @@ class RichConsole:
         cols = Columns(self.tables.values(), align="center", expand=True, equal=True)
         self._metrics_panel = Panel(cols, title="SynthEval Results")
         self._error_messages = ""
+        self._error_buffer = []
         
         self._table_rows = {}
         self._output = Layout()
@@ -130,7 +131,7 @@ class RichConsole:
         return table
 
     def format_input(self, value):
-        val = f"{value:.4f}" if isinstance(value, (int, float)) else value
+        val = f"{value:.4f}" if np.issubdtype(type(value), np.number) else value
         val = val if val is not None else "-"
         val = f"[red]{val}[/red]" if val == "FAILED" else val
         return val
@@ -152,24 +153,34 @@ class RichConsole:
         self._table_rows[table_id].append(row_data)
         self._tables[table_id].add_row(*row_data[:-1])
         return self._output["metrics"].update(self._metrics_panel)
-
+    
     def add_error_message(self, message: str):
-        self._output["error messages"].visible = True
-        self._error_messages += message + "\n"
-        self._output["error messages"].update(
-            Panel(
-                Columns(
-                    [
-                        Text(
-                            self._error_messages,
-                            justify="left",
-                            tab_size=4,
-                            no_wrap=True,
-                        ),
-                        Text(""),
-                    ]
-                ),
-                expand=False,
-                title="Error Messages",
-            )
-        )
+        """Buffer error messages; render later after Live ends."""
+        self._error_buffer.append(message)
+        
+    def flush_errors(self, title: str = "Error Messages"):
+        """Print buffered errors after Live finishes."""
+        if not self._error_buffer:
+            return
+        body = "\n".join(self._error_buffer)
+        self._console.print(Panel(Text(body, justify="left", no_wrap=True), title=title))
+    # def add_error_message(self, message: str):
+    #     self._output["error messages"].visible = True
+    #     self._error_messages += message + "\n"
+    #     self._output["error messages"].update(
+    #         Panel(
+    #             Columns(
+    #                 [
+    #                     Text(
+    #                         self._error_messages,
+    #                         justify="left",
+    #                         tab_size=4,
+    #                         no_wrap=True,
+    #                     ),
+    #                     Text(""),
+    #                 ]
+    #             ),
+    #             expand=False,
+    #             title="Error Messages",
+    #         )
+    #     )

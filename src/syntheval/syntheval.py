@@ -8,17 +8,20 @@ import glob
 import time
 
 import traceback
+from tqdm import tqdm
 
 import pandas as pd
 from rich.live import Live
 from typing import Literal, List, Dict
 from pandas import DataFrame
 
-import concurrent.futures
-from concurrent.futures import TimeoutError
+
+# import concurrent.futures
+# from concurrent.futures import TimeoutError
 
 from .metrics import load_metrics
 from .utils.rich_console import RichConsole
+from .utils.ascii_console import AsciiConsole
 from .utils.preprocessing import consistent_label_encoding
 from .utils.postprocessing import extremes_ranking, linear_ranking, quantile_ranking, summation_ranking
 from .utils.variable_detection import get_cat_variables
@@ -50,7 +53,8 @@ class SynthEval():
                  nn_distance: Literal['gower', 'euclid', 'EXPERIMENTAL_gower'] = 'gower', 
                  unique_threshold: int = 10,
                  verbose: bool = True,
-                 timeout: int|None = None
+                 enable_plots: bool = True,
+                 console: Literal['rich', 'ascii', 'off'] = 'rich',
         ) -> None:
         """Primary object for accessing the SynthEval evaluation framework. Create with the real data used for training 
         and use either evaluate of benchmark methods for evaluating synthetic datasets.
@@ -61,13 +65,17 @@ class SynthEval():
             cat_cols            : (optional) complete list of categorical columns column names. 
             nn_distance         : {default= 'gower', 'euclid', 'EXPERIMENTAL_gower'} distance metric for NN distances.
             unique_threshold    : threshold of unique levels in non-object columns to be considered categoricals.    
-            verbose             : flag fo printing to console and making figures.
+            verbose             : flag for printing heads-up information to the console.
+            enable_plots        : flag for enabling plot generation.
+            console             : type of console output to use ('rich', 'ascii', 'off').
             timeout             : (optional) time limit for each metric in seconds.
         """
 
         self.real = real_dataframe
         self.verbose = verbose
-        self.timeout = timeout
+        self.enable_plots = enable_plots
+        #TODO: autoset console type to 'ascii' if running in an environment where rich console is not supported (e.g. jupyterlab, pycharm, vs code, etc.)
+        self.console = console
 
         if holdout_dataframe is not None:
             # Make sure columns and their order are the same.
@@ -159,97 +167,99 @@ class SynthEval():
                 continue
             else:
                 methods_loaded.append(method)
-        method_types = [loaded_metrics[method].type() for method in methods_loaded]
-        methods_sorted = [x for _, x in sorted(zip(method_types, methods_loaded))]
+        #TODO: add timeout feature to the metric evaluation, so that user can skip metrics that are taking too long to run.
 
         raw_results = {}
         key_results = None
 
-        def evaluate_method(method):
-            try:
-                M = loaded_metrics[method](
-                    real_data, synt_data, hout_data, self.categorical_columns,
-                    self.numerical_columns, self.nn_dist, analysis_target_var,
-                    do_preprocessing=CLE, verbose=self.verbose
-                )
-                raw_result = M.evaluate(**evaluation_config[method])
-                rich_rows = M.format_output()
-                key_result = M.normalize_output()
-                return method, raw_result, key_result, rich_rows, None
-            except Exception as e:
-                return method, None, None, None, str(e)
-
-        if self.verbose:
+        if self.console == 'rich':
             co = RichConsole(methods_loaded)
             output_screen = co.output
             console = co.console
             error_counter = 0
             with Live(output_screen, console=console, refresh_per_second=4, transient=False, screen=True, vertical_overflow="visible") as live:
                 console.show_cursor(True)
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future_to_method = {
-                        executor.submit(evaluate_method, method): method
-                        for method in methods_loaded
-                    }
-                
-                    for future in concurrent.futures.as_completed(future_to_method):
-                        method = future_to_method[future]
-                        try:
-                            method, raw_result, key_result, rich_rows, error = future.result(timeout=self.timeout)
-                            if error:
-                                raise Exception(error)
-                            raw_results[method] = raw_result
-                            if key_result is None:
-                                key_results = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
-                            else:
-                                tmp_df = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
-                                key_results = pd.concat((key_results, tmp_df), axis = 0).reset_index(drop=True)
-
-                            if rich_rows is not None:
-                                co.update_result_table_rows(method, rich_rows)
-                            co.update_runtime_table(method, f"[bold green]V[/bold green]")
-
-                        except TimeoutError:
-                            error_counter += 1
-                            live.console.print(f"{method} timed out after {self.timeout} seconds.")
-                            co.add_error_message(message=f"{method} timed out after {self.timeout} seconds.\n")
-                            co.update_runtime_table(method, f"[bold yellow]T[/bold yellow]")
-                            continue
-                        except Exception as e:
-                            error_counter += 1
-                            live.console.print(f"{method} failed to run. excpetion: {e}")
-                            error_message = traceback.format_exc()
-                            co.add_error_message(message=error_message)
-                            co.update_runtime_table(method, f"[bold red]X[/bold red]")
-                            continue
-                        finally:
-                            live.update(output_screen)
-
-            co.hide_runtime_table(trigger = error_counter == 0)
-            console.print(output_screen)
-        else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future_to_method = {
-                    executor.submit(evaluate_method, method): method
-                    for method in methods_loaded
-                }
-
-                for future in concurrent.futures.as_completed(future_to_method):
-                    method = future_to_method[future]
+                for method in methods_loaded:
                     try:
-                        method, raw_result, key_result, _, error = future.result(timeout=self.timeout)
-                        if error:
-                            raise Exception(error)
-                        raw_results[method] = raw_result
+                        M = loaded_metrics[method](
+                            real_data, synt_data, hout_data, self.categorical_columns, self.numerical_columns, self.nn_dist,
+                             analysis_target_var, do_preprocessing=CLE, verbose=self.verbose, plot_figures=self.enable_plots
+                            )
+                        raw_results[method] = M.evaluate(**evaluation_config[method])
+                        formatted_output = M.format_output()
+                        key_result = M.normalize_output()
+
                         if key_result is None:
                             key_results = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
                         else:
                             tmp_df = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
                             key_results = pd.concat((key_results, tmp_df), axis = 0).reset_index(drop=True)
+
+                        if formatted_output is not None:
+                            co.update_result_table_rows(method, formatted_output)
+                        co.update_runtime_table(method, f"[bold green]V[/bold green]")
+                    # except TimeoutError:
+                    #     error_counter += 1
+                    #     live.console.print(f"{method} timed out after {self.timeout} seconds.")
+                    #     # co.add_error_message(message=f"{method} timed out after {self.timeout} seconds.\n")
+                    #     co.update_runtime_table(method, f"[bold yellow]T[/bold yellow]")
+                    #     continue
                     except Exception as e:
-                        print(f"{method} failed to run. excpetion: {e}")
+                        error_counter += 1
+                        # live.console.print(f"{method} failed to run. excpetion: {e}")
+                        error_message = traceback.format_exc()
+                        co.add_error_message(message=error_message)
+                        co.update_runtime_table(method, f"[bold red]X[/bold red]")
                         continue
+                    finally:
+                        live.update(output_screen)
+
+            co.hide_runtime_table(trigger = error_counter == 0)
+            console.print(output_screen)
+            co.flush_errors()
+        elif self.console == 'ascii':
+            co = AsciiConsole()
+            pbar = tqdm(methods_loaded)
+            for method in pbar:
+                pbar.set_description(f'Syntheval: {method}')
+                try:                    
+                    M = loaded_metrics[method](
+                        real_data, synt_data, hout_data, self.categorical_columns, self.numerical_columns, self.nn_dist, 
+                        analysis_target_var, do_preprocessing=CLE, verbose=self.verbose, plot_figures=self.enable_plots
+                        )
+                    raw_results[method] = M.evaluate(**evaluation_config[method])
+                    formatted_output = M.format_output()
+                    key_result = M.normalize_output()
+
+                    if formatted_output is not None:
+                            co.add_results_to_tables(formatted_output)
+
+                    if key_result is None:
+                        key_results = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
+                    else:
+                        tmp_df = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
+                        key_results = pd.concat((key_results, tmp_df), axis = 0).reset_index(drop=True)
+
+                except Exception as e:
+                    print(f"{method} failed to run. excpetion: {e}")
+                    continue
+
+            co.flush_tables()
+        else:
+            for method in methods_loaded:
+                try:
+                    M = loaded_metrics[method](real_data, synt_data, hout_data, self.categorical_columns, self.numerical_columns, self.nn_dist, analysis_target_var, do_preprocessing=CLE, verbose=self.verbose, plot_figures=self.enable_plots)
+                    raw_results[method] = M.evaluate(**evaluation_config[method])
+                    key_result = M.normalize_output()
+
+                    if key_result is None:
+                        key_results = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
+                    else:
+                        tmp_df = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
+                        key_results = pd.concat((key_results, tmp_df), axis = 0).reset_index(drop=True)
+                except Exception as e:
+                    print(f"{method} failed to run. excpetion: {e}")
+                    continue
 
         # Save non-standard evaluation config to a json file
         if (kwargs != {} and self.verbose):
@@ -284,10 +294,9 @@ class SynthEval():
         """
         # TODO: integrate the rich console with this method as well.
         # Part to avoid printing in the following and resetting to user preference after
-        verbose_flag = False
-        if self.verbose == True:
-            verbose_flag = True
-            self.verbose = False
+
+        reset_verbose, reset_plotting, reset_console = self.verbose, self.enable_plots, self.console
+        self.verbose, self.enable_plots, self.console = False, False, 'off'
 
         # Part to process the input
         if isinstance(dfs_or_path, str):
@@ -363,5 +372,5 @@ class SynthEval():
         vals_df.to_csv('SE_benchmark_results' +'_' +name_tag+ '.csv')
         temp_df.to_csv('SE_benchmark_ranking' +'_' +name_tag+ '.csv')
 
-        self.verbose = verbose_flag
+        self.verbose, self.enable_plots, self.console = reset_verbose, reset_plotting, reset_console
         return comb_df, rank_df

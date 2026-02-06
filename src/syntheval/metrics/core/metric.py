@@ -23,7 +23,8 @@ class MetricClass(ABC):
         nn_dist (str) : keyword literal for NN module (not used by all metrics)
         analysis_target (str) : target variable name (not used by all metrics)
         do_preprocessing (bool|object) : whether to preprocess the data or module to use for preprocessing
-        verbose (bool) : whether to print and plot results
+        verbose (bool) : whether to enable prints
+        plot_figures (bool) : whether to plot figures
     """ 
 
     def __init__(
@@ -36,7 +37,8 @@ class MetricClass(ABC):
             nn_dist: str = None,
             analysis_target : str = None,
             do_preprocessing: bool | object = True,
-            verbose: bool = True
+            verbose: bool = True,
+            plot_figures: bool = True
     ) -> None:
         
         if isinstance(do_preprocessing, (int, bool)) and do_preprocessing == True:
@@ -65,6 +67,7 @@ class MetricClass(ABC):
         self.results = {}
 
         self.verbose = verbose
+        self.plot_figures = plot_figures
 
         pass
 
@@ -86,10 +89,11 @@ class MetricClass(ABC):
         pass
 
     @abstractmethod
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |       
+    def format_output(self) -> List[tuple]:
+        """ Return a list of tuples for printing results to the rich console.
+        Required format: [(metric type in lowercase, string (max 40 characters), value, error)]
+        Example:
+            [('utility', 'Metric description', 0.1234, 0.0123)]
         """
         pass
 
@@ -115,14 +119,4 @@ class MetricClass(ABC):
         [Benchmark] Second set is normalised to the zero-one interval so zero 
         represents the worst possible performance and one is the best possible 
         performance."""
-        pass
-    
-    ### Hooks
-    def extra_formatted_output(self) -> Dict[str, str]:
-        """ Some metrics may output both privacy and utility results. For keeping 
-        these results seperate in the console print, string output can be placed here 
-        to be put in the end of the opposite console text output than the metric type 
-        specified above.
-
-        """
         pass
