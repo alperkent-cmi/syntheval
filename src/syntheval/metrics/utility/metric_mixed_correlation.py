@@ -154,7 +154,7 @@ class MixedCorrelation(MetricClass):
             >>> import pandas as pd
             >>> real = pd.DataFrame({'num': [1, 2, 3], 'cat': [0, 1, 0]})
             >>> fake = pd.DataFrame({'num': [1, 2, 3], 'cat': [0, 1, 0]})
-            >>> MC = MixedCorrelation(real, fake, cat_cols=['cat'], num_cols=['num'], do_preprocessing=False, verbose=False)
+            >>> MC = MixedCorrelation(real, fake, cat_cols=['cat'], num_cols=['num'], do_preprocessing=False, plot_figures=False)
             >>> MC.evaluate(mixed_corr=True)
             {'corr_mat_diff': 0.0, 'corr_mat_dims': 2}
         """
@@ -163,12 +163,12 @@ class MixedCorrelation(MetricClass):
             r_corr = mixed_correlation(self.real_data,self.num_cols,self.cat_cols)
             f_corr = mixed_correlation(self.synt_data,self.num_cols,self.cat_cols)
             corr_mat = r_corr-f_corr
-            if self.verbose: plot_matrix_heatmap(corr_mat,'Mixed correlation matrix difference', 'corr', axs_lim, axs_scale)
+            if self.plot_figures: plot_matrix_heatmap(corr_mat,'Mixed correlation matrix difference', 'corr', axs_lim, axs_scale)
         else:
             r_corr = self.real_data[self.num_cols].corr()
             f_corr = self.synt_data[self.num_cols].corr()
             corr_mat = r_corr-f_corr
-            if self.verbose: plot_matrix_heatmap(corr_mat,'Correlation matrix difference (nums only)', 'corr', axs_lim, axs_scale)
+            if self.plot_figures: plot_matrix_heatmap(corr_mat,'Correlation matrix difference (nums only)', 'corr', axs_lim, axs_scale)
         
         self.results = {'corr_mat_diff': np.linalg.norm(corr_mat,ord='fro'), 'corr_mat_dims': len(corr_mat)}
         if return_mats: self.results['real_cor_mat'] = r_corr

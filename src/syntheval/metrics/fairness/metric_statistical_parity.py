@@ -13,8 +13,6 @@ from sklearn.model_selection import KFold
 
 from syntheval.metrics.core.metric import MetricClass
 
-from syntheval.utils.console_output import format_metric_string
-
 class StatisticalParity(MetricClass):
     """The Metric Class is an abstract class that interfaces with
     SynthEval. When initialised the class has the following attributes:
@@ -115,13 +113,16 @@ class StatisticalParity(MetricClass):
             >>> SP.evaluate('A', 1, folds=2) # doctest: +ELLIPSIS
             {'statistical_parity': -1.0, ...}
         """
-        assert (
-            protected_attribute in self.synt_data.columns
-        ), "The protected attribute is not in the data"
-        assert (
-            positive_class in self.synt_data[self.analysis_target].unique()
-        ), "The positive class is not in the data"
-        assert positive_class in [0, 1], "The positive class must be either 0 or 1"
+        try:
+            assert (
+                protected_attribute in self.synt_data.columns
+            ), "The protected attribute is not in the data"
+            assert (
+                positive_class in self.synt_data[self.analysis_target].unique()
+            ), "The positive class is not in the data"
+            assert positive_class in [0, 1], "The positive class must be either 0 or 1"
+        except AssertionError as e:
+            raise ValueError(str(e))
 
         # Split the data
         X = self.synt_data.loc[:, self.synt_data.columns != self.analysis_target]

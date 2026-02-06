@@ -55,10 +55,9 @@ class ConfidenceIntervalOverlap(MetricClass):
             assert confidence in confidence_table.keys()
         except AssertionError:
             if len(self.num_cols) == 0:
-                print(" Warning: No nummerical attributes provided for confidence interval overlap metric.")
+                raise ValueError("No nummerical attributes provided for confidence interval overlap metric.")
             else:
-                print(" Error: Confidence level not recognized, choose 80, 90, 95, 98 or 99.")
-            return {}
+                raise ValueError("Confidence level not recognized, choose 80, 90, 95, 98 or 99.")
         else:
             self.confidence = confidence
 

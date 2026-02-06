@@ -129,7 +129,7 @@ class KolmogorovSmirnovTest(MetricClass):
                         'sigs cols': sig_cols
                         }
 
-        if (self.verbose and sig_cols != []): plot_significantly_dissimilar_variables(self.real_data, self.synt_data, sig_cols, self.cat_cols)
+        if (self.plot_figures and sig_cols != []): plot_significantly_dissimilar_variables(self.real_data, self.synt_data, sig_cols, self.cat_cols)
         return self.results
     
     def format_output(self) -> list:

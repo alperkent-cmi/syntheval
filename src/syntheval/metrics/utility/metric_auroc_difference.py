@@ -60,27 +60,26 @@ class MetricClassName(MetricClass):
             {'model': 'log_reg', 'auroc_diff': 0.0}
         """
         try:
-            assert self.analysis_target is not None
-            assert len(pd.unique(self.real_data[self.analysis_target])) == 2
-            assert len(pd.unique(self.synt_data[self.analysis_target])) == 2
-            assert self.hout_data is not None
-        except AssertionError:
-            print(" Warning: AUROC metric did not run, analysis target variable did not have appropriate number levels (i.e. 2) or test data was not supplied!")
-            pass
+            assert self.analysis_target is not None, "AUROC metric did not run, no analysis target variable specified!"
+            assert len(pd.unique(self.real_data[self.analysis_target])) == 2, "AUROC metric did not run, analysis target variable did not have appropriate number levels (i.e. 2)!"
+            assert len(pd.unique(self.synt_data[self.analysis_target])) == 2, "AUROC metric did not run, analysis target variable did not have appropriate number levels (i.e. 2)!"
+            assert self.hout_data is not None, "AUROC metric did not run, no holdout data supplied!"
+            assert model in ['rf_cls', 'log_reg'], "AUROC metric did not run, unrecognised model name supplied! Use 'rf_cls' or 'log_reg'."
+        except AssertionError as e:
+            raise AssertionError(e)
         else:
             real_x, real_y = self.real_data.drop([self.analysis_target], axis=1), self.real_data[self.analysis_target]
             fake_x, fake_y = self.synt_data.drop([self.analysis_target], axis=1), self.synt_data[self.analysis_target]
 
             hout_x, hout_y = self.hout_data.drop([self.analysis_target], axis=1), self.hout_data[self.analysis_target]
-            if model == 'rf_cls':
-                model1 = RandomForestClassifier(random_state=42)
-                model2 = RandomForestClassifier(random_state=42)
-            elif model == 'log_reg':
-                model1 = LogisticRegression(random_state=42, max_iter=100)
-                model2 = LogisticRegression(random_state=42, max_iter=100)
-            else:
-                print(f" Error: Unrecognised model name '{model}'!")
-                pass
+
+            match model:
+                case 'rf_cls':
+                    model1 = RandomForestClassifier(random_state=42)
+                    model2 = RandomForestClassifier(random_state=42)
+                case 'log_reg':
+                    model1 = LogisticRegression(random_state=42, max_iter=100)
+                    model2 = LogisticRegression(random_state=42, max_iter=100)
 
             roc_curves_real = []
             roc_curves_fake = []
@@ -124,7 +123,7 @@ class MetricClassName(MetricClass):
             roc_auc_mean_real = auc(mean_fpr, mean_tpr_real)
             roc_auc_mean_fake = auc(mean_fpr, mean_tpr_fake)
 
-            if self.verbose: plot_roc_curves([mean_fpr, mean_tpr_real, roc_auc_mean_real], 
+            if self.plot_figures: plot_roc_curves([mean_fpr, mean_tpr_real, roc_auc_mean_real], 
                                              [mean_fpr, mean_tpr_real, std_tpr_real], 
                                              [mean_fpr, mean_tpr_fake, roc_auc_mean_fake],
                                              [mean_fpr, mean_tpr_fake, std_tpr_fake],
@@ -135,32 +134,8 @@ class MetricClassName(MetricClass):
         
     def format_output(self) -> list:
         """ Return a list of tuples for printing results to the rich console."""
-        try:
-            assert self.analysis_target is not None
-            assert len(pd.unique(self.real_data[self.analysis_target])) == 2
-            assert len(pd.unique(self.synt_data[self.analysis_target])) == 2
-            assert self.hout_data is not None
-        except AssertionError:
-            pass
-        else:
-            row = ("utility", "prediction AUROC difference (%7s)" % (self.results['model']), self.results['auroc_diff'], None),
-            return [row]
-    
-#     def format_output(self) -> str:
-#         """ Return string for formatting the output, when the
-#         metric is part of SynthEval. 
-# |                                          :                    |"""
-#         try:
-#             assert self.analysis_target is not None
-#             assert len(pd.unique(self.real_data[self.analysis_target])) == 2
-#             assert len(pd.unique(self.synt_data[self.analysis_target])) == 2
-#             assert self.hout_data is not None
-#         except AssertionError:
-#             pass
-#         else:
-#             string = """\
-# | prediction AUROC difference (%7s)    :   %.4f           |""" % (self.results['model'], self.results['auroc_diff'])
-#             return string
+        row = ("utility", f"Prediction AUROC difference ({self.results['model']:<7})", self.results['auroc_diff'], None)
+        return [row]
 
     def normalize_output(self) -> list:
         """ This function is for making a dictionary of the most quintessential

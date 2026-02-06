@@ -20,7 +20,8 @@ class MetricClassName(MetricClass):
     self.nn_dist   : string keyword
     self.analysis_target: variable name
 
-    self.verbose   : bool (mainly for supressing prints and plots)
+    self.verbose   : bool (for supressing prints)
+    self.plot_figures: bool (for supressing plots)
 
     """
 

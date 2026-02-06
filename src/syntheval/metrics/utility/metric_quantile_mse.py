@@ -52,7 +52,7 @@ class MetricClassName(MetricClass):
         try:
             assert (len(self.num_cols)>=1 or cat_mse)
         except AssertionError:
-            print('Error: Quantile mse did not run, no nummerical attributes, or cat_mse not enabled!')
+            raise ValueError("Quantile mse did not run, no nummerical attributes, or cat_mse not enabled!")
         else:
             qMSE_lst = []
             for category in self.real_data.columns:

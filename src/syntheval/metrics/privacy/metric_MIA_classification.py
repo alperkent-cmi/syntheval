@@ -56,8 +56,7 @@ class MIAClassifier(MetricClass):
         try:
             assert self.hout_data is not None
         except AssertionError:
-            print(" Warning: Membership inference attack metric did not run, holdout data was not supplied!")
-            pass
+            raise ValueError("Membership inference attack metric did not run, holdout data was not supplied!")
         else:
             if len(self.real_data) < len(self.hout_data) // 2:
                     warning(

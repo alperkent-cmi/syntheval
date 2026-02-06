@@ -7,7 +7,6 @@ import numpy as np
 from syntheval.metrics.core.metric import MetricClass
 
 from syntheval.utils.nn_distance import _knn_distance
-from syntheval.utils.console_output import format_metric_string
 
 def _adversarial_score(real, fake, cat_cols, metric):
     """Function for calculating adversarial score
@@ -133,13 +132,13 @@ class NearestNeighbourAdversarialAccuracy(MetricClass):
         rows = []
         rows.append(("utility",
                     "Nearest neighbour adversarial accuracy", 
-                    f"{self.results['avg']:.4f}", 
-                    f"{self.results['err']:.4f}"))
+                    self.results['avg'], 
+                    self.results['err']))
         if (self.results != {} and self.hout_data is not None):
             rows.append(("privacy",
                         "Privacy loss (diff. in NNAA)", 
-                         f"{self.results['priv_loss']:.4f}", 
-                         f"{self.results['priv_loss_err']:.4f}"))
+                         self.results['priv_loss'], 
+                         self.results['priv_loss_err']))
         return rows
 
     def normalize_output(self) -> list:

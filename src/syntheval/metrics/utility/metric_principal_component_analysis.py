@@ -56,21 +56,19 @@ class PrincipalComponentAnalysis(MetricClass):
             >>> import pandas as pd
             >>> real = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
             >>> fake = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
-            >>> PCA = PrincipalComponentAnalysis(real, fake, cat_cols=[], analysis_target='a', do_preprocessing=False, verbose=False)
+            >>> PCA = PrincipalComponentAnalysis(real, fake, cat_cols=[], analysis_target='a', do_preprocessing=False, plot_figures=False)
             >>> PCA.evaluate()
         """
 
         try:
             assert ((self.analysis_target is not None and self.analysis_target in self.cat_cols) and (use_cats or len(self.num_cols)>=2))
         except AssertionError:
-            if self.verbose:
-                if use_cats or len(self.num_cols)<2:
-                    print('Error: Principal component analysis did not run, too few attributes!')
-                elif self.analysis_target is None: 
-                    print('Error: Principal component analysis did not run, analysis class variable not set!')
-                else:
-                    print('Error: Principal component analysis did not run, provided class not in list of categoricals!')
-            pass
+            if use_cats or len(self.num_cols)<2:
+                raise ValueError("Too few numerical attributes provided for principal component analysis metric.")
+            elif self.analysis_target is None: 
+                raise ValueError("No analysis target provided for principal component analysis metric.")
+            else:
+                raise ValueError("Provided class not in list of categoricals for principal component analysis metric.")
         else:
             if use_cats:
                 select_cols = self.num_cols + self.cat_cols
@@ -82,8 +80,7 @@ class PrincipalComponentAnalysis(MetricClass):
 
             self.results = res
 
-            if self.verbose:  # For the pca plots we have to redo some stuff
-
+            if self.plot_figures:  # For the pca plots we have to redo some stuff
                 if preprocess == 'mean':
                     real_data = self.encoder.decode(self.real_data)
                     synt_data = self.encoder.decode(self.synt_data)

@@ -140,8 +140,7 @@ class ClassificationAccuracy(MetricClass):
             assert len(self.synt_data[self.analysis_target].unique()) >= 2, "SynthEval(cls_acc): Synthetic label column has less than 2 unique values!"
             assert cls_models != [], "SynthEval(cls_acc): No classification models provided!"
         except AssertionError as e:
-            print(e)
-            return {}
+            raise AssertionError(e)
         else:
             self.results = {}
             real_x, real_y = self.real_data.drop([self.analysis_target], axis=1), self.real_data[self.analysis_target]
@@ -216,14 +215,14 @@ class ClassificationAccuracy(MetricClass):
                 mod_dict = self.results[model]
                 rows.append((
                     "prediction",
-                    f"{model_name_dict[model]:<23} | RR {mod_dict['rr_val_acc']:.2f} | FR {mod_dict['fr_val_acc']:.2f}",
+                    f"{model_name_dict[model]:<22} | RR {mod_dict['rr_val_acc']:.2f} | FR {mod_dict['fr_val_acc']:.2f}",
                         mod_dict['fr_val_acc'] - mod_dict['rr_val_acc'],
                         np.sqrt(mod_dict['rr_val_err']**2 + mod_dict['fr_val_err']**2)
                 ))
             if (len(self.models) > 1):
                 rows.append((
                     "prediction",
-                    f"{averages_str:<23} | RR {np.mean(self.class_avg[0,:]):.2f} | FR {np.mean(self.class_avg[1,:]):.2f}",
+                    f"{averages_str:<22} | RR {np.mean(self.class_avg[0,:]):.2f} | FR {np.mean(self.class_avg[1,:]):.2f}",
                     self.results['avg diff'],
                     self.results['avg diff err']
                 ))
@@ -233,14 +232,14 @@ class ClassificationAccuracy(MetricClass):
                     mod_dict = self.results[model]
                     rows.append((
                         "prediction",
-                        f"{model_name_dict[model]:<23} | RR {mod_dict['rr_test_acc']:.2f} | FR {mod_dict['fr_test_acc']:.2f}",
+                        f"{model_name_dict[model]:<22} | RR {mod_dict['rr_test_acc']:.2f} | FR {mod_dict['fr_test_acc']:.2f}",
                             mod_dict['fr_test_acc'] - mod_dict['rr_test_acc'],
                             None,
                     ))
                 if (len(self.models) > 1):
                     rows.append((
                         "prediction",
-                        f"{averages_str:<23} | RR {np.mean(self.holdout_res[0,:]):.2f} | FR {np.mean(self.holdout_res[1,:]):.2f}",
+                        f"{averages_str:<22} | RR {np.mean(self.holdout_res[0,:]):.2f} | FR {np.mean(self.holdout_res[1,:]):.2f}",
                         self.results['avg diff hout'],
                         self.results['avg diff err hout']
                     ))
