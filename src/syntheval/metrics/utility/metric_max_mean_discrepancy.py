@@ -20,7 +20,7 @@ def _polynomial_kernel(A, B, degree=3, coef0=1):
 def _rbf_kernel(A, B, gamma):
     """ RBF kernel, K(x, y) = exp(-gamma * ||x-y||^2) """
     sq_dists = cdist(A, B, "sqeuclidean")
-    return np.exp(-gamma * sq_dists // 2)
+    return np.exp(-gamma * sq_dists / 2)
 
 def _off_diagonal_mean(K):
     """ get the unbiased estimate of the mean of the off-diagonal elements of a kernel matrix K """
@@ -94,8 +94,8 @@ class MaximumMeanDiscrepancy(MetricClass):
             Y = self.synt_data[self.num_cols].values
 
         # Standardize the data based on the real data statistics
-        X_scaled = (X - X.mean(axis=0)) / X.std(axis=0)
-        Y_scaled = (Y - X.mean(axis=0)) / X.std(axis=0)
+        X_scaled = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-8)
+        Y_scaled = (Y - X.mean(axis=0)) / (X.std(axis=0) + 1e-8)
         
         match kernel:
             case "linear":
@@ -113,6 +113,8 @@ class MaximumMeanDiscrepancy(MetricClass):
                     Z = np.vstack([X_scaled, Y_scaled])
                     dists = cdist(Z, Z, "sqeuclidean")
                     gamma = 1.0 / (2 * np.median(dists[dists > 0]))
+                    if gamma == 0:  # Handle case where all points are identical
+                        gamma = 1.0
 
                 self.results['rbf_gamma'] = gamma
                 Kxx = _rbf_kernel(X_scaled, X_scaled, gamma)
