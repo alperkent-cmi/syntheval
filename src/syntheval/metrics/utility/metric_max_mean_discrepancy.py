@@ -75,9 +75,9 @@ class MaximumMeanDiscrepancy(MetricClass):
             >>> import pandas as pd
             >>> real = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
             >>> fake = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
-            >>> MMD = MaximumMeanDiscrepancy(real, fake, cat_cols=[], analysis_target='a', do_preprocessing=False)
+            >>> MMD = MaximumMeanDiscrepancy(real, fake, cat_cols=[], num_cols=['a', 'b'], analysis_target='a', do_preprocessing=False)
             >>> MMD.evaluate(use_cats=False, kernel='linear')
-            ... {'mmd': 0.0, 'mmd_normalized': 1.0}
+            {'kernel': 'linear', 'u_mmd': ..., 'u_mmd_clip': 0, 'b_mmd': 0.0, 'b_mmd_clip': 0.0}
         """
         try:
             assert use_cats and len(self.cat_cols) > 0 or not use_cats, "Categorical columns must be specified if use_cats is True."

@@ -54,10 +54,12 @@ class PrincipalComponentAnalysis(MetricClass):
 
         Example:
             >>> import pandas as pd
-            >>> real = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
-            >>> fake = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
-            >>> PCA = PrincipalComponentAnalysis(real, fake, cat_cols=[], analysis_target='a', do_preprocessing=False, plot_figures=False)
+            >>> real = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6], 'c': ['x', 'y', 'z']})
+            >>> fake = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6], 'c': ['x', 'y', 'z']})
+            >>> PCA = PrincipalComponentAnalysis(real, fake, cat_cols=['c'], num_cols=['a', 'b'], 
+            ...     analysis_target='c', do_preprocessing=False, plot_figures=False)
             >>> PCA.evaluate()
+            {'exp_var_diff': 0.0, 'comp_angle_diff': 0.0}
         """
 
         try:

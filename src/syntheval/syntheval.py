@@ -15,7 +15,6 @@ from rich.live import Live
 from typing import Literal, List, Dict
 from pandas import DataFrame
 
-
 # import concurrent.futures
 # from concurrent.futures import TimeoutError
 
@@ -30,6 +29,16 @@ loaded_metrics = load_metrics()
 
 def _has_not_slash_backslash_or_dot(input_string):
     return not ('/' in input_string or '\\' in input_string or '.' in input_string)
+
+def _add_key_results(key_results, key_result):
+    if key_result is None:
+        return key_results
+    if key_results is None:
+        key_results = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
+    else:
+        tmp_df = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
+        key_results = pd.concat((key_results, tmp_df), axis = 0).reset_index(drop=True)
+    return key_results
 
 class SynthEval():
     """Primary object for accessing the SynthEval evaluation framework. Create with the real data used for training
@@ -76,6 +85,7 @@ class SynthEval():
         self.enable_plots = enable_plots
         #TODO: autoset console type to 'ascii' if running in an environment where rich console is not supported (e.g. jupyterlab, pycharm, vs code, etc.)
         self.console = console
+        # self.timeout = timeout
 
         if holdout_dataframe is not None:
             # Make sure columns and their order are the same.
@@ -133,7 +143,7 @@ class SynthEval():
             >>> import pandas as pd
             >>> real_data = pd.read_csv('guides/example/penguins_train.csv')
             >>> synthetic_data = pd.read_csv('guides/example/penguins_BN_syn.csv')
-            >>> SE = SynthEval(real_data, verbose = False)
+            >>> SE = SynthEval(real_data, verbose = False, console='off', enable_plots=False)
             >>> res = SE.evaluate(synthetic_data, analysis_target_var='species', ks_test={}, eps_risk={})
         """
         self._update_syn_data(synthetic_dataframe)
@@ -189,11 +199,7 @@ class SynthEval():
                         formatted_output = M.format_output()
                         key_result = M.normalize_output()
 
-                        if key_result is None:
-                            key_results = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
-                        else:
-                            tmp_df = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
-                            key_results = pd.concat((key_results, tmp_df), axis = 0).reset_index(drop=True)
+                        key_results = _add_key_results(key_results, key_result)
 
                         if formatted_output is not None:
                             co.update_result_table_rows(method, formatted_output)
@@ -234,11 +240,7 @@ class SynthEval():
                     if formatted_output is not None:
                             co.add_results_to_tables(formatted_output)
 
-                    if key_result is None:
-                        key_results = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
-                    else:
-                        tmp_df = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
-                        key_results = pd.concat((key_results, tmp_df), axis = 0).reset_index(drop=True)
+                    key_results = _add_key_results(key_results, key_result)
 
                 except Exception as e:
                     print(f"{method} failed to run. excpetion: {e}")
@@ -252,11 +254,7 @@ class SynthEval():
                     raw_results[method] = M.evaluate(**evaluation_config[method])
                     key_result = M.normalize_output()
 
-                    if key_result is None:
-                        key_results = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
-                    else:
-                        tmp_df = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
-                        key_results = pd.concat((key_results, tmp_df), axis = 0).reset_index(drop=True)
+                    key_results = _add_key_results(key_results, key_result)
                 except Exception as e:
                     print(f"{method} failed to run. excpetion: {e}")
                     continue
