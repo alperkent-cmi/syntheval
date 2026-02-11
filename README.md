@@ -42,7 +42,7 @@ evaluator.evaluate(df_fake, class_lab_col, presets_file = "full_eval", **kwargs)
 ```
 Where the user supplies <code>df_real, df_test, df_fake</code> as pandas dataframes, the <code>class_cat_col</code> is a complete list of column names (which can be omitted for categoricals to be automatically inferred). Some metrics require a target class, so <code>class_lab_col</code> is a string for designating one column with discrete values as a target for usability predictions and colouration. In the evaluate function, a presets file can be chosen ("full_eval", "fast_eval", or "privacy") or alternatively, a filepath can be supplied to a json file with select metrics keywords. Finally, instead of (or in addition to), keyword arguments can be added in the end with additional metrics and their options. 
 
-New in version 1.4 is the benchmark module, that allows a directory of synthetic datasets to be specified for evaluation (or a dictionary of dataframes). All datasets in the folder are evaluated against the training (and test) data on the selected metrics. Three types of rank-derived scoring are available to choose between ("linear", "normal", or "quantile"), assisting in identifying datasets that perform well overall, and on utility and privacy dimensions.
+Version 1.4 introduced the benchmark module, that allows a directory of synthetic datasets to be specified for evaluation (or a dictionary of dataframes). All datasets in the folder are evaluated against the training (and test) data on the selected metrics. Three types of rank-derived scoring are available to choose between ("linear", "normal", or "quantile"), assisting in identifying datasets that perform well overall, and on utility and privacy dimensions.
 ```python
 evaluator.benchmark('local/path_to/target_dir/', class_lab_col, presets_file = "full_eval", rank_strategy='normal', **kwargs)
 ```
@@ -89,7 +89,9 @@ In the code we implemented:
 - Hellinger Distance (avg. distance)
 - Propensity Mean Squared Error (pMSE and accuracy)
 - Prediction AUROC difference (for binary target variables only)
-- Nearest Neighbour Adversarial Accuracy (NNAA) 
+- Nearest Neighbour Adversarial Accuracy (NNAA)
+- Quantile MSE
+- Maximum Mean Discrepancy (MMD)
 
 ### classification accuracy
 In this tool we test useability by training four different <code>sklearn</code> classifiers on real and synthetic data with 5-fold cross-validation (testing both models on the real validation fold). 

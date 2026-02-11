@@ -77,7 +77,6 @@ class SynthEval():
             verbose             : flag for printing heads-up information to the console.
             enable_plots        : flag for enabling plot generation.
             console             : type of console output to use ('rich', 'ascii', 'off').
-            timeout             : (optional) time limit for each metric in seconds.
         """
 
         self.real = real_dataframe
