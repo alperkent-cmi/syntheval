@@ -1,6 +1,6 @@
 {
     "dwm"       : {},
-    "pca"       : {"preprocess": "mean"},
+    "pca"       : {"preprocess": "std"},
     "cio"       : {"confidence": 95},
     "ks_test"   : {"sig_lvl": 0.05, "n_perms": 1000},
     "h_dist"    : {},

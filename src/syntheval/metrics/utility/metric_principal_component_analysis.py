@@ -41,7 +41,7 @@ class PrincipalComponentAnalysis(MetricClass):
         """ Set to 'privacy' or 'utility' """
         return 'utility'
 
-    def evaluate(self, num_components = 2, preprocess: Literal['mean', 'std'] = 'mean', use_cats: bool = False) -> float | dict:
+    def evaluate(self, num_components = 2, preprocess: Literal['mean', 'std'] = 'std', use_cats: bool = False) -> float | dict:
         """ Function for evaluating the metric
         
         Args:
