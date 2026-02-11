@@ -15,6 +15,20 @@ from rich.layout import Layout
 from rich.text import Text
 from dataclasses import dataclass
 
+def in_notebook():
+    """Function to check if we are in a notebook environment.
+    credit: https://stackoverflow.com/a/22424821
+    """
+    try:
+        from IPython import get_ipython
+        if 'IPKernelApp' not in get_ipython().config:
+            return False
+    except ImportError:
+        return False
+    except AttributeError:
+        return False
+    return True
+
 @dataclass
 class RichConsole:
     _metrics: list

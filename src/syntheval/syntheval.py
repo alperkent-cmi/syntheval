@@ -19,7 +19,7 @@ from pandas import DataFrame
 # from concurrent.futures import TimeoutError
 
 from .metrics import load_metrics
-from .utils.rich_console import RichConsole
+from .utils.rich_console import RichConsole, in_notebook
 from .utils.ascii_console import AsciiConsole
 from .utils.preprocessing import consistent_label_encoding
 from .utils.postprocessing import extremes_ranking, linear_ranking, quantile_ranking, summation_ranking
@@ -82,8 +82,13 @@ class SynthEval():
         self.real = real_dataframe
         self.verbose = verbose
         self.enable_plots = enable_plots
-        #TODO: autoset console type to 'ascii' if running in an environment where rich console is not supported (e.g. jupyterlab, pycharm, vs code, etc.)
-        self.console = console
+
+        if in_notebook() and console == 'rich':
+            self.console = 'ascii'
+            if self.verbose:
+                print("Rich console is not supported in this environment. Defaulting to ascii console.")
+        else:
+            self.console = console
         # self.timeout = timeout
 
         if holdout_dataframe is not None:
@@ -266,7 +271,7 @@ class SynthEval():
         self._raw_results = raw_results
         return key_results
 
-    def benchmark(self, dfs_or_path: Dict[str, DataFrame] | str, analysis_target_var=None, presets_file=None, rank_strategy='linear', **kwargs):
+    def benchmark(self, dfs_or_path: Dict[str, DataFrame] | str, analysis_target_var=None, presets_file=None, rank_strategy='summation', **kwargs):
         """Method for running SynthEval multiple times across all synthetic data files in a
         specified directory. Making a results file, and calculating rank-derived utility 
         and privacy scores.
@@ -274,8 +279,14 @@ class SynthEval():
         Parameters:
             dfs_or_path         : dict of dataframes or string like '/example/ex_data_dir/' to folder with datasets
             analysis_target_var : string column name of categorical variable to check
-            rank_strategy       : {default='linear', 'normal', 'quantile', 'summation'} see descriptions below
+            rank_strategy       : {default='summation', 'normal', 'quantile', 'linear'}, see descriptions below.
 
+        Details on rank strategies:
+            "summation": Uses default normalisation sums the normalised numbers. A higher number is better.
+            "linear": Apply min-max scaling to the normalised columns, take the row sum as rank. Appropriate when there is enough separation between scores that we can trust a linear scale like this.
+            "quantile": The normalised numbers are converted to quantiles and then summed. Appropriate for lots of samples that are not all on top of each other, e.g. high variance, uniform distribution etc.
+            "normal": Map worst and best score to 0 and 1 respectively, everything else is 0.5. This scheme works to separate overall best and worst from normally distributed mass, where we may not be able to say much objectively founded about the intermediate results subject to noise.
+            
         Returns:
             comb_df : dataframe with the metrics and their rank derived scores
             rank_df : dataframe with the ranks used to make the scores
@@ -344,7 +355,7 @@ class SynthEval():
 
         match rank_strategy:
             case 'normal': rank_df = extremes_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
-            case'linear': rank_df = linear_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
+            case 'linear': rank_df = linear_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
             case 'quantile': rank_df = quantile_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
             case 'summation': rank_df = summation_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
             case _: raise Exception("Error: unrecognised rank_strategy keyword!")
