@@ -59,7 +59,7 @@ class PrincipalComponentAnalysis(MetricClass):
             >>> PCA = PrincipalComponentAnalysis(real, fake, cat_cols=['c'], num_cols=['a', 'b'], 
             ...     analysis_target='c', do_preprocessing=False, plot_figures=False)
             >>> PCA.evaluate()
-            {'exp_var_diff': 0.0, 'comp_angle_diff': 0.0}
+            {'exp_var_diff': 0.0, 'comp_angle_diff': ...}
         """
 
         try:
