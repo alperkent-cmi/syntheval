@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='syntheval',
-    version='1.7.0-beta',
+    version='1.7.0-beta.1',
     packages=['syntheval'],#find_packages(),
     include_package_data=True,
     install_requires=[

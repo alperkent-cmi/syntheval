@@ -7,6 +7,7 @@ import json
 import glob
 import time
 
+import asyncio
 import traceback
 from tqdm import tqdm
 
@@ -14,9 +15,6 @@ import pandas as pd
 from rich.live import Live
 from typing import Literal, List, Dict
 from pandas import DataFrame
-
-# import concurrent.futures
-# from concurrent.futures import TimeoutError
 
 from .metrics import load_metrics
 from .utils.rich_console import RichConsole, in_notebook
@@ -29,6 +27,20 @@ loaded_metrics = load_metrics()
 
 def _has_not_slash_backslash_or_dot(input_string):
     return not ('/' in input_string or '\\' in input_string or '.' in input_string)
+
+def _metric_work(method, evaluation_config, worker_args):
+    try:
+        M = method(**worker_args)
+        raw_result = M.evaluate(**evaluation_config)
+        formatted_output = M.format_output()
+        key_result = M.normalize_output()
+        error = None
+    except Exception as e:
+        raw_result, formatted_output, key_result, error = None, None, None, e
+    return raw_result, formatted_output, key_result, error
+
+async def _run_metric_with_timeout(method, evaluation_config, worker_args, timeout):
+    return await asyncio.wait_for(asyncio.to_thread(_metric_work, method, evaluation_config, worker_args), timeout=timeout)
 
 def _add_key_results(key_results, key_result):
     if key_result is None:
@@ -64,6 +76,7 @@ class SynthEval():
                  verbose: bool = True,
                  enable_plots: bool = True,
                  console: Literal['rich', 'ascii', 'off'] = 'rich',
+                 timeout: int = None
         ) -> None:
         """Primary object for accessing the SynthEval evaluation framework. Create with the real data used for training 
         and use either evaluate of benchmark methods for evaluating synthetic datasets.
@@ -77,6 +90,7 @@ class SynthEval():
             verbose             : flag for printing heads-up information to the console.
             enable_plots        : flag for enabling plot generation.
             console             : type of console output to use ('rich', 'ascii', 'off').
+            timeout             : time in seconds after which a metric evaluation will be interrupted and skipped. Default is None (no timeout).
         """
 
         self.real = real_dataframe
@@ -89,7 +103,7 @@ class SynthEval():
                 print("Rich console is not supported in this environment. Defaulting to ascii console.")
         else:
             self.console = console
-        # self.timeout = timeout
+        self.timeout = timeout
 
         if holdout_dataframe is not None:
             # Make sure columns and their order are the same.
@@ -183,6 +197,19 @@ class SynthEval():
                 methods_loaded.append(method)
         #TODO: add timeout feature to the metric evaluation, so that user can skip metrics that are taking too long to run.
 
+        worker_args = {
+            'real_data': real_data,
+            'synt_data': synt_data,
+            'hout_data': hout_data,
+            'cat_cols': self.categorical_columns,
+            'num_cols': self.numerical_columns,
+            'nn_dist': self.nn_dist,
+            'analysis_target' : analysis_target_var,
+            'do_preprocessing': CLE,
+            'verbose': self.verbose,
+            'plot_figures': self.enable_plots
+        }
+
         raw_results = {}
         key_results = None
 
@@ -195,31 +222,26 @@ class SynthEval():
                 console.show_cursor(True)
                 for method in methods_loaded:
                     try:
-                        M = loaded_metrics[method](
-                            real_data, synt_data, hout_data, self.categorical_columns, self.numerical_columns, self.nn_dist,
-                             analysis_target_var, do_preprocessing=CLE, verbose=self.verbose, plot_figures=self.enable_plots
-                            )
-                        raw_results[method] = M.evaluate(**evaluation_config[method])
-                        formatted_output = M.format_output()
-                        key_result = M.normalize_output()
-
+                        raw, formatted_output, key_result, error = asyncio.run(
+                            _run_metric_with_timeout(loaded_metrics[method], evaluation_config[method], worker_args, self.timeout)
+                        )
+                        if error is not None:
+                            raise error
+                        raw_results[method] = raw
                         key_results = _add_key_results(key_results, key_result)
 
                         if formatted_output is not None:
                             co.update_result_table_rows(method, formatted_output)
-                        co.update_runtime_table(method, f"[bold green]V[/bold green]")
-                    # except TimeoutError:
-                    #     error_counter += 1
-                    #     live.console.print(f"{method} timed out after {self.timeout} seconds.")
-                    #     # co.add_error_message(message=f"{method} timed out after {self.timeout} seconds.\n")
-                    #     co.update_runtime_table(method, f"[bold yellow]T[/bold yellow]")
-                    #     continue
+                        co.update_runtime_table(method, "[bold green]V[/bold green]")
+                    except asyncio.TimeoutError:
+                        error_counter += 1
+                        co.update_runtime_table(method, "[bold yellow]T[/bold yellow]")
+                        continue
                     except Exception as e:
                         error_counter += 1
-                        # live.console.print(f"{method} failed to run. excpetion: {e}")
                         error_message = traceback.format_exc()
                         co.add_error_message(message=error_message)
-                        co.update_runtime_table(method, f"[bold red]X[/bold red]")
+                        co.update_runtime_table(method, "[bold red]X[/bold red]")
                         continue
                     finally:
                         live.update(output_screen)
@@ -230,38 +252,49 @@ class SynthEval():
         elif self.console == 'ascii':
             co = AsciiConsole()
             pbar = tqdm(methods_loaded)
+            timed_out_methods = [] 
             for method in pbar:
                 pbar.set_description(f'Syntheval: {method}')
                 try:                    
-                    M = loaded_metrics[method](
-                        real_data, synt_data, hout_data, self.categorical_columns, self.numerical_columns, self.nn_dist, 
-                        analysis_target_var, do_preprocessing=CLE, verbose=self.verbose, plot_figures=self.enable_plots
+                    raw, formatted_output, key_result, error = asyncio.run(
+                            _run_metric_with_timeout(loaded_metrics[method], evaluation_config[method], worker_args, self.timeout)
                         )
-                    raw_results[method] = M.evaluate(**evaluation_config[method])
-                    formatted_output = M.format_output()
-                    key_result = M.normalize_output()
-
+                    if error is not None:
+                        raise error
+                    raw_results[method] = raw
+                    key_results = _add_key_results(key_results, key_result)
+                    
                     if formatted_output is not None:
                             co.add_results_to_tables(formatted_output)
-
-                    key_results = _add_key_results(key_results, key_result)
-
+                except asyncio.TimeoutError:
+                    timed_out_methods.append(method)
+                    continue
                 except Exception as e:
                     print(f"{method} failed to run. excpetion: {e}")
                     continue
 
             co.flush_tables()
+            if timed_out_methods != []:
+                print(f"Some methods timed out after {self.timeout} seconds:\n{', '.join(timed_out_methods)}")
         else:
+            timed_out_methods = [] 
             for method in methods_loaded:
                 try:
-                    M = loaded_metrics[method](real_data, synt_data, hout_data, self.categorical_columns, self.numerical_columns, self.nn_dist, analysis_target_var, do_preprocessing=CLE, verbose=self.verbose, plot_figures=self.enable_plots)
-                    raw_results[method] = M.evaluate(**evaluation_config[method])
-                    key_result = M.normalize_output()
-
+                    raw, formatted_output, key_result, error = asyncio.run(
+                            _run_metric_with_timeout(loaded_metrics[method], evaluation_config[method], worker_args, self.timeout)
+                        )
+                    if error is not None:
+                        raise error
+                    raw_results[method] = raw
                     key_results = _add_key_results(key_results, key_result)
+                except asyncio.TimeoutError:
+                    timed_out_methods.append(method)
+                    continue
                 except Exception as e:
                     print(f"{method} failed to run. excpetion: {e}")
                     continue
+            if timed_out_methods != []:
+                print(f"Some methods timed out after {self.timeout} seconds:\n{', '.join(timed_out_methods)}")
 
         # Save non-standard evaluation config to a json file
         if (kwargs != {} and self.verbose):
