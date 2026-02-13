@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "syntheval"
-version = "1.7.0-beta.1"
+version = "1.7.0b1"
 authors = [
   { name="Anton D. Lautrup"},
   { name="Tobias Hyrup"},
@@ -16,10 +16,11 @@ dependencies = [
     "matplotlib",
     "numpy ~= 1.26 ",
     "pandas",
-    "scikit-learn >= 1.2",
+    "scikit-learn >= 1.6.1",
     "scipy >= 1.14.1",
     "seaborn",
     "tqdm",
+    "rich ~= 13.4.2",
     "lightgbm",
     "pcametric ~= 1.0.3",
 ]

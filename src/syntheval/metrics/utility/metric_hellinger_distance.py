@@ -24,11 +24,18 @@ def _scott_ref_rule(set1,set2):
     samples = np.concatenate((set1, set2))
     std = np.std(samples)
     n = len(samples)
-    bin_width = np.ceil(n**(1/3) * std / (3.5 * (np.percentile(samples, 75) - np.percentile(samples, 25)))).astype(int)
-
-    min_edge = min(samples); max_edge = max(samples)
-    N = min(abs(int((max_edge-min_edge)/bin_width)),10000); Nplus1 = N + 1
-    return np.linspace(min_edge, max_edge, Nplus1)
+    if np.percentile(samples, 75) - np.percentile(samples, 25) == 0:
+        bins = np.percentile(samples, [0, 10, 25, 75, 90, 100])
+        bins = np.unique(bins)
+        if len(bins) < 2:
+            bins = np.unique(samples)
+        return bins
+    else:
+        bin_width = np.ceil(n**(1/3) * std / (3.5 * (np.percentile(samples, 75) - np.percentile(samples, 25)))).astype(int)
+        min_edge = min(samples); max_edge = max(samples)
+        N = min(abs(int((max_edge-min_edge)/bin_width)),10000)
+        bins = np.linspace(min_edge, max_edge, N + 1)
+        return bins
 
 def _hellinger(p,q):
     """Hellinger distance between distributions
