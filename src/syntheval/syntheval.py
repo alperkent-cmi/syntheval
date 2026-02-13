@@ -195,7 +195,6 @@ class SynthEval():
                 continue
             else:
                 methods_loaded.append(method)
-        #TODO: add timeout feature to the metric evaluation, so that user can skip metrics that are taking too long to run.
 
         worker_args = {
             'real_data': real_data,
