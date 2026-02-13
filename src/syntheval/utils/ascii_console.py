@@ -2,10 +2,6 @@
 # Author: Anton D. Lautrup
 # Date: 25-08-2023
 
-import numpy as np
-
-from tqdm import tqdm
-
 def print_results_to_console(utility_output_txt,privacy_output_txt,fairness_output_txt):
     print("""\
 
