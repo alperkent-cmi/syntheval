@@ -127,13 +127,19 @@ class NearestNeighbourAdversarialAccuracy(MetricClass):
 
         return self.results
 
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |"""
-        string = """\
-| Nearest neighbour adversarial accuracy   :   %.4f  %.4f   |""" % (self.results['avg'], self.results['err'])
-        return string
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
+        rows = []
+        rows.append(("utility",
+                    "Nearest neighbour adversarial accuracy", 
+                    self.results['avg'], 
+                    self.results['err']))
+        if (self.results != {} and self.hout_data is not None):
+            rows.append(("privacy",
+                        "Privacy loss (diff. in NNAA)", 
+                         self.results['priv_loss'], 
+                         self.results['priv_loss_err']))
+        return rows
 
     def normalize_output(self) -> list:
         """ This function is for making a dictionary of the most quintessential
@@ -159,12 +165,4 @@ class NearestNeighbourAdversarialAccuracy(MetricClass):
                         'n_err': self.results['priv_loss_err'], 
                         }])
             return output
-        else: pass
-
-    def extra_formatted_output(self) -> dict:
-        """Bit for printing the privacy loss together with the other privacy metrics"""
-        if (self.results != {} and self.hout_data is not None):
-            string = """\
-| Privacy loss (diff. in NNAA)             :   %.4f  %.4f   |""" % (self.results['priv_loss'], self.results['priv_loss_err'])
-            return {'privacy': string}
         else: pass

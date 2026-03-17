@@ -13,8 +13,6 @@ from sklearn.model_selection import KFold
 
 from syntheval.metrics.core.metric import MetricClass
 
-from syntheval.utils.console_output import format_metric_string
-
 class StatisticalParity(MetricClass):
     """The Metric Class is an abstract class that interfaces with
     SynthEval. When initialised the class has the following attributes:
@@ -115,13 +113,16 @@ class StatisticalParity(MetricClass):
             >>> SP.evaluate('A', 1, folds=2) # doctest: +ELLIPSIS
             {'statistical_parity': -1.0, ...}
         """
-        assert (
-            protected_attribute in self.synt_data.columns
-        ), "The protected attribute is not in the data"
-        assert (
-            positive_class in self.synt_data[self.analysis_target].unique()
-        ), "The positive class is not in the data"
-        assert positive_class in [0, 1], "The positive class must be either 0 or 1"
+        try:
+            assert (
+                protected_attribute in self.synt_data.columns
+            ), "The protected attribute is not in the data"
+            assert (
+                positive_class in self.synt_data[self.analysis_target].unique()
+            ), "The positive class is not in the data"
+            assert positive_class in [0, 1], "The positive class must be either 0 or 1"
+        except AssertionError as e:
+            raise ValueError(str(e))
 
         # Split the data
         X = self.synt_data.loc[:, self.synt_data.columns != self.analysis_target]
@@ -151,16 +152,10 @@ class StatisticalParity(MetricClass):
 
         return self.results
 
-    def format_output(self) -> str:
-        """Return string for formatting the output, when the
-                metric is part of SynthEval.
-        |                                          :                    |"""
-        string = format_metric_string(
-            "Statistical Parity difference",
-            self.results["statistical_parity"],
-            self.results["statistical_parity se"],
-        )
-        return string
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
+        rows = ('fairness', "Statistical Parity difference", self.results["statistical_parity"], self.results["statistical_parity se"])
+        return [rows]
 
     def normalize_output(self) -> list:
         """This function is for making a dictionary of the most quintessential

@@ -61,16 +61,19 @@ class NearestNeighbourDistanceRatio(MetricClass):
             self.results['priv_loss_err'] = err_diff
         return self.results
 
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |"""
-        string = """\
-| Nearest neighbour distance ratio         :   %.4f  %.4f   |""" % (self.results['avg'], self.results['err'])
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
+        rows = []
+        rows.append(("privacy",
+                    "Nearest neighbour distance ratio",
+                    self.results['avg'],
+                    self.results['err']))
         if (self.results != {} and self.hout_data is not None):
-             string += """\n\
-| Privacy loss (diff. in NNDR)             :   %.4f  %.4f   |""" % (self.results['priv_loss'], self.results['priv_loss_err'])
-        return string
+            rows.append(("privacy",
+                        "Privacy loss (diff. in NNDR)",
+                        self.results['priv_loss'],
+                        self.results['priv_loss_err']))
+        return rows
 
     def normalize_output(self) -> list:
         """ This function is for making a dictionary of the most quintessential

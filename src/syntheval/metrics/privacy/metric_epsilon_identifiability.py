@@ -99,17 +99,20 @@ class EpsilonIdentifiability(MetricClass):
 
         return self.results
 
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |"""
-        string = """\
-| Epsilon identifiability risk             :   %.4f           |""" % (self.results['eps_risk'])
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
+        rows = []
+        rows.append(("privacy",
+                    "Epsilon identifiability risk",
+                    self.results['eps_risk'],
+                    None))
         if (self.results != {} and self.hout_data is not None):
-             string += """       
-| Privacy loss (diff. in eps. risk)        :   %.4f           |""" % (self.results['priv_loss'])
-        return string
-
+            rows.append(("privacy",
+                        "Privacy loss (diff. in eps. risk)",
+                        self.results['priv_loss'],
+                        None))
+        return rows
+    
     def normalize_output(self) -> list:
         """ This function is for making a dictionary of the most quintessential
         nummerical results of running this metric (to be turned into a dataframe).

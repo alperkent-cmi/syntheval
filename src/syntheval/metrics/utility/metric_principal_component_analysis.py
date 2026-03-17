@@ -41,7 +41,7 @@ class PrincipalComponentAnalysis(MetricClass):
         """ Set to 'privacy' or 'utility' """
         return 'utility'
 
-    def evaluate(self, num_components = 2, preprocess: Literal['mean', 'std'] = 'mean', use_cats: bool = False) -> float | dict:
+    def evaluate(self, num_components = 2, preprocess: Literal['mean', 'std'] = 'std', use_cats: bool = False) -> float | dict:
         """ Function for evaluating the metric
         
         Args:
@@ -54,23 +54,23 @@ class PrincipalComponentAnalysis(MetricClass):
 
         Example:
             >>> import pandas as pd
-            >>> real = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
-            >>> fake = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
-            >>> PCA = PrincipalComponentAnalysis(real, fake, cat_cols=[], analysis_target='a', do_preprocessing=False, verbose=False)
+            >>> real = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6], 'c': ['x', 'y', 'z']})
+            >>> fake = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6], 'c': ['x', 'y', 'z']})
+            >>> PCA = PrincipalComponentAnalysis(real, fake, cat_cols=['c'], num_cols=['a', 'b'], 
+            ...     analysis_target='c', do_preprocessing=False, plot_figures=False)
             >>> PCA.evaluate()
+            {'exp_var_diff': 0.0, 'comp_angle_diff': ...}
         """
 
         try:
             assert ((self.analysis_target is not None and self.analysis_target in self.cat_cols) and (use_cats or len(self.num_cols)>=2))
         except AssertionError:
-            if self.verbose:
-                if use_cats or len(self.num_cols)<2:
-                    print('Error: Principal component analysis did not run, too few attributes!')
-                elif self.analysis_target is None: 
-                    print('Error: Principal component analysis did not run, analysis class variable not set!')
-                else:
-                    print('Error: Principal component analysis did not run, provided class not in list of categoricals!')
-            pass
+            if use_cats or len(self.num_cols)<2:
+                raise ValueError("Too few numerical attributes provided for principal component analysis metric.")
+            elif self.analysis_target is None: 
+                raise ValueError("No analysis target provided for principal component analysis metric.")
+            else:
+                raise ValueError("Provided class not in list of categoricals for principal component analysis metric.")
         else:
             if use_cats:
                 select_cols = self.num_cols + self.cat_cols
@@ -82,8 +82,7 @@ class PrincipalComponentAnalysis(MetricClass):
 
             self.results = res
 
-            if self.verbose:  # For the pca plots we have to redo some stuff
-
+            if self.plot_figures:  # For the pca plots we have to redo some stuff
                 if preprocess == 'mean':
                     real_data = self.encoder.decode(self.real_data)
                     synt_data = self.encoder.decode(self.synt_data)
@@ -124,16 +123,14 @@ class PrincipalComponentAnalysis(MetricClass):
 
             return self.results
 
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval. 
-|                                          :                    |"""
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
         if self.results != {}:
-            string = """\
-| PCA difference in eigenvalues (exp. var.):   %.4f           |
-| PCA angle diff. between eigenvectors     :   %.4f           |""" % (self.results['exp_var_diff'], 
-                                                                      self.results['comp_angle_diff'])
-            return string
+            rows =[
+                ("utility", "PCA difference in eigenvalues (exp. var.)", self.results['exp_var_diff'], None),
+                ("utility", "PCA angle diff. between eigenvectors", self.results['comp_angle_diff'], None),
+            ]
+            return rows
         else: pass
 
     def normalize_output(self) -> list:

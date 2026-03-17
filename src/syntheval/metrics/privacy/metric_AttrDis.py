@@ -234,23 +234,20 @@ class AttributeDisclosure(MetricClass):
 
         return self.results
 
-    def format_output(self) -> str:
-        """Return string for formatting the output, when the
-                metric is part of SynthEval.
-        |                                          :                    |"""
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
         if self.hout_data is not None:
-            string = """\
-| Attr. disclosure risk (acc. with holdout):   %.4f  %.4f   |""" % (
-            self.results["Attr Dis accuracy"],
-            self.results["Attr Dis accuracy se"],
-        )
+            row = [("privacy", 
+                    "Attr. disclosure risk (acc. with holdout)", 
+                    self.results["Attr Dis accuracy"],
+                    self.results["Attr Dis accuracy se"])]
+            return row
         else:
-            string = """\
-| Attr. disclosure risk (accuracy)         :   %.4f  %.4f   |""" % (
-            self.results["Attr Dis accuracy"],
-            self.results["Attr Dis accuracy se"],
-        )
-        return string
+            row = [("privacy", 
+                    "Attr. disclosure risk (accuracy)", 
+                    self.results["Attr Dis accuracy"],
+                    self.results["Attr Dis accuracy se"])]
+            return row
 
     def normalize_output(self) -> list:
         """This function is for making a dictionary of the most quintessential

@@ -55,10 +55,9 @@ class ConfidenceIntervalOverlap(MetricClass):
             assert confidence in confidence_table.keys()
         except AssertionError:
             if len(self.num_cols) == 0:
-                print(" Warning: No nummerical attributes provided for confidence interval overlap metric.")
+                raise ValueError("No nummerical attributes provided for confidence interval overlap metric.")
             else:
-                print(" Error: Confidence level not recognized, choose 80, 90, 95, 98 or 99.")
-            return {}
+                raise ValueError("Confidence level not recognized, choose 80, 90, 95, 98 or 99.")
         else:
             self.confidence = confidence
 
@@ -76,7 +75,7 @@ class ConfidenceIntervalOverlap(MetricClass):
                     top = (min(us[i][0],us[i][1])-max(ls[i][0],ls[i][1]))
                     Jk.append(max(0,0.5*(top/(us[i][0]-ls[i][0])+top/(us[i][1]-ls[i][1]))))
 
-                num = sum([j == 0 for j in Jk])
+                num = float(sum([j == 0 for j in Jk]))
                 frac = num/len(Jk)
                 self.results = {'avg overlap': np.mean(Jk), 
                                 'overlap err': np.std(Jk,ddof=1)/np.sqrt(len(Jk)), 
@@ -85,22 +84,31 @@ class ConfidenceIntervalOverlap(MetricClass):
                                 }
                 return self.results
 
-    def format_output(self) -> str:
-        """ Return string for formatting the output, when the
-        metric is part of SynthEval.
-|                                          :                    |"""
-        if self.results != {}:
-            string = """\
-| Average confidence interval overlap      :   %.4f  %.4f   |
-|   -> # non-overlapping COIs at %2d%%       :   %2d               |
-|   -> fraction of non-overlapping CIs     :   %.4f           |""" % (
-            self.results['avg overlap'],
-            self.results['overlap err'],
-            self.confidence,
-            self.results['num non-overlaps'],
-            self.results['frac non-overlaps'])
-            return string
-        else: pass
+    def format_output(self) -> list:
+        """ Return a list of tuples for printing results to the rich console."""
+        rows = [
+            ("utility", "Average confidence interval overlap", self.results['avg overlap'], self.results['overlap err']),
+            ("utility", "  -> Fraction of non-overlapping CIs", self.results['frac non-overlaps'], None),
+            ("utility", f"  -> # non-overlapping COIs at {self.confidence:2d}%", self.results['num non-overlaps'], None),
+        ]
+        return rows
+
+#     def format_output(self) -> str:
+#         """ Return string for formatting the output, when the
+#         metric is part of SynthEval.
+# |                                          :                    |"""
+#         if self.results != {}:
+#             string = """\
+# | Average confidence interval overlap      :   %.4f  %.4f   |
+# |   -> # non-overlapping COIs at %2d%%       :   %2d               |
+# |   -> fraction of non-overlapping CIs     :   %.4f           |""" % (
+#             self.results['avg overlap'],
+#             self.results['overlap err'],
+#             self.confidence,
+#             self.results['num non-overlaps'],
+#             self.results['frac non-overlaps'])
+#             return string
+#         else: pass
 
     def normalize_output(self) -> list:
         """ This function is for making a dictionary of the most quintessential

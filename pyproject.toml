@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "syntheval"
-version = "1.6.2"
+version = "1.7.0b1"
 authors = [
   { name="Anton D. Lautrup"},
   { name="Tobias Hyrup"},
@@ -20,6 +20,7 @@ dependencies = [
     "scipy >= 1.14.1",
     "seaborn",
     "tqdm",
+    "rich ~= 13.4.2",
     "lightgbm",
     "pcametric ~= 1.0.3",
 ]
