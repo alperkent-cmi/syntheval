@@ -303,7 +303,7 @@ class SynthEval():
         self._raw_results = raw_results
         return key_results
 
-    def benchmark(self, dfs_or_path: Dict[str, DataFrame] | str, analysis_target_var=None, presets_file=None, rank_strategy='summation', **kwargs):
+    def benchmark(self, dfs_or_path: Dict[str, DataFrame] | str, analysis_target_var=None, presets_file=None, rank_strategy='summation', output_folder=None, **kwargs):
         """Method for running SynthEval multiple times across all synthetic data files in a
         specified directory. Making a results file, and calculating rank-derived utility 
         and privacy scores.
@@ -312,6 +312,7 @@ class SynthEval():
             dfs_or_path         : dict of dataframes or string like '/example/ex_data_dir/' to folder with datasets
             analysis_target_var : string column name of categorical variable to check
             rank_strategy       : {default='summation', 'normal', 'quantile', 'linear'}, see descriptions below.
+            output_folder       : (optional) path to folder where benchmark CSV results should be saved. Defaults to current directory.
 
         Details on rank strategies:
             "summation": Uses default normalisation sums the normalised numbers. A higher number is better.
@@ -409,8 +410,18 @@ class SynthEval():
         name_tag = str(int(time.time()))
         temp_df = comb_df.copy()
         temp_df.columns = ['_'.join(col) for col in comb_df.columns.values]
-        vals_df.to_csv('SE_benchmark_results' +'_' +name_tag+ '.csv')
-        temp_df.to_csv('SE_benchmark_ranking' +'_' +name_tag+ '.csv')
+        
+        # Create output folder if specified
+        if output_folder is not None:
+            os.makedirs(output_folder, exist_ok=True)
+            results_path = os.path.join(output_folder, f'SE_benchmark_results_{name_tag}.csv')
+            ranking_path = os.path.join(output_folder, f'SE_benchmark_ranking_{name_tag}.csv')
+        else:
+            results_path = f'SE_benchmark_results_{name_tag}.csv'
+            ranking_path = f'SE_benchmark_ranking_{name_tag}.csv'
+        
+        vals_df.to_csv(results_path)
+        temp_df.to_csv(ranking_path)
 
         self.verbose, self.enable_plots, self.console = reset_verbose, reset_plotting, reset_console
         return comb_df, rank_df
