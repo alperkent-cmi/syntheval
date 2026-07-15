@@ -82,11 +82,17 @@ def _run_coroutine_sync(coro):
 def _add_key_results(key_results, key_result):
     if key_result is None:
         return key_results
+    tmp_df = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
     if key_results is None:
-        key_results = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
-    else:
-        tmp_df = pd.DataFrame(key_result, columns=['metric', 'dim', 'val','err','n_val','n_err'])
-        key_results = pd.concat((key_results, tmp_df), axis = 0).reset_index(drop=True)
+        return tmp_df
+    # Individual metric rows routinely have all-NA columns (e.g. privacy-only
+    # metrics leave n_val/n_err empty), which triggers pandas' FutureWarning
+    # about empty/all-NA entries changing result dtypes on concat. The
+    # resulting dtypes are harmless here (object columns are fine), so the
+    # warning is suppressed rather than worked around.
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=FutureWarning, message='.*empty or all-NA entries.*')
+        key_results = pd.concat((key_results, tmp_df), axis=0).reset_index(drop=True)
     return key_results
 
 class SynthEval():
