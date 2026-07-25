@@ -192,7 +192,7 @@ class SynthEval():
         print(loaded_metrics)
         pass
 
-    def evaluate(self, synthetic_dataframe: DataFrame, analysis_target: AnalysisConfig | str = None, presets_file: str = None, **kwargs):
+    def evaluate(self, synthetic_dataframe: DataFrame, analysis_target: AnalysisConfig | str = None, presets_file: str = None, _dataset_name: str = None, **kwargs):
         """Method for generating the SynthEval evaluation report on a synthetic dataset. Includes the metrics specified in the 
         presets file or through the keyword arguments. Returns a dataframe with the primary results, and prints to console if 
         verbose. The raw output can be accessed as a charateristic of the SynthEval object after running this method 
@@ -202,6 +202,8 @@ class SynthEval():
             synthetic_dataframe     : synthetic dataset, in dataframe format. 
             analysis_target         : string column name of categorical variable to check or an instance of AnalysisConfig.
             presets_file            : {default=None, 'full_eval', 'fast_eval', 'privacy'} or json file path.
+            _dataset_name            : (internal) model/dataset name used to label the progress bar when called via
+                                       benchmark(); not meant to be passed directly by callers of evaluate().
             **kwargs                : keyword arguments for metrics e.g. ks_test={}, eps_risk={}, ...
 
         Deprecated:
@@ -363,8 +365,12 @@ class SynthEval():
             # each dataset's `evaluate()` in a separate (loky) process when
             # benchmarking multiple datasets in parallel -- without the pid,
             # interleaved bars from different datasets would be
-            # indistinguishable.
+            # indistinguishable. The model/dataset name (passed through from
+            # benchmark() as _dataset_name) is included too, since pid alone
+            # doesn't say WHICH model is being evaluated in that process.
             log_prefix = f"[syntheval pid={os.getpid()}]"
+            if _dataset_name is not None:
+                log_prefix = f"[syntheval pid={os.getpid()} model={_dataset_name}]"
             timed_out_methods = []
             pbar = tqdm(methods_loaded, desc=log_prefix, unit="metric")
             for method in pbar:
@@ -492,7 +498,7 @@ class SynthEval():
 
         def _evaluate_one(name, dataframe):
             if plot_output_dir is None:
-                return self.evaluate(dataframe, analysis_target, resolved_presets_file, **metric_kwargs)
+                return self.evaluate(dataframe, analysis_target, resolved_presets_file, _dataset_name=name, **metric_kwargs)
             # Isolate this dataset's native plots into their own subfolder so
             # concurrent (loky-process) evaluations don't clobber each other's
             # timestamp-named PNGs by writing into the same cwd.
@@ -501,7 +507,7 @@ class SynthEval():
             original_dir = os.getcwd()
             os.chdir(dataset_plot_dir)
             try:
-                return self.evaluate(dataframe, analysis_target, resolved_presets_file, **metric_kwargs)
+                return self.evaluate(dataframe, analysis_target, resolved_presets_file, _dataset_name=name, **metric_kwargs)
             finally:
                 os.chdir(original_dir)
 
