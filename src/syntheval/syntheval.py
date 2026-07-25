@@ -9,6 +9,7 @@ import time
 import threading
 import warnings
 import io
+from pathlib import Path
 
 import asyncio
 import traceback
@@ -215,6 +216,8 @@ class SynthEval():
             >>> synthetic_data = pd.read_csv('guides/example/penguins_BN_syn.csv')
             >>> SE = SynthEval(real_data, verbose = False, console = 'off', enable_plots = False)
             >>> res = SE.evaluate(synthetic_data, analysis_target = 'species', ks_test={}, eps_risk={})
+            >>> isinstance(res, pd.DataFrame)
+            True
         """
         self._update_syn_data(synthetic_dataframe)
 
@@ -347,8 +350,26 @@ class SynthEval():
             if timed_out_methods != []:
                 print(f"Some methods timed out after {self.timeout} seconds:\n{', '.join(timed_out_methods)}")
         else:
-            timed_out_methods = [] 
-            for method in methods_loaded:
+            # Per-metric progress bar (always on, even with console='off' /
+            # verbose=False -- e.g. this is the branch `benchmark()` always
+            # uses since it force-overrides console/verbose before calling
+            # evaluate()). Without this there is NO way to tell which metric a
+            # run is currently on or how long it's been running, which makes a
+            # merely-slow-but-still-progressing run indistinguishable from a
+            # genuinely hung one from the outside. Uses the same tqdm-style
+            # single updating bar as the rest of the pipeline (e.g. training/
+            # sampling progress bars) instead of printing a new line per
+            # metric. Prefixed with the worker's pid since `benchmark()` runs
+            # each dataset's `evaluate()` in a separate (loky) process when
+            # benchmarking multiple datasets in parallel -- without the pid,
+            # interleaved bars from different datasets would be
+            # indistinguishable.
+            log_prefix = f"[syntheval pid={os.getpid()}]"
+            timed_out_methods = []
+            pbar = tqdm(methods_loaded, desc=log_prefix, unit="metric")
+            for method in pbar:
+                pbar.set_postfix_str(method, refresh=True)
+                t0 = time.time()
                 try:
                     raw, formatted_output, key_result, error, warnings_list = _run_coroutine_sync(
                             _run_metric_with_timeout(
@@ -359,18 +380,20 @@ class SynthEval():
                         raise error
                     raw_results[method] = raw
                     key_results = _add_key_results(key_results, key_result)
-                    
+
                     if self.show_warnings and warnings_list:
                         for warning_msg in warnings_list:
-                            print(f"WARNING ({method}): {warning_msg}")
+                            pbar.write(f"{log_prefix} WARNING ({method}): {warning_msg}")
                 except asyncio.TimeoutError:
                     timed_out_methods.append(method)
+                    pbar.write(f"{log_prefix} '{method}' timed out after {self.timeout}s")
                     continue
                 except Exception as e:
-                    print(f"{method} failed to run. excpetion: {e}")
+                    pbar.write(f"{log_prefix} '{method}' failed after {time.time() - t0:.1f}s: {e}")
                     continue
             if timed_out_methods != []:
-                print(f"Some methods timed out after {self.timeout} seconds:\n{', '.join(timed_out_methods)}")
+                pbar.write(f"Some methods timed out after {self.timeout} seconds:\n{', '.join(timed_out_methods)}")
+
 
         # Save non-standard evaluation config to a json file
         if (metric_kwargs != {} and self.verbose):
@@ -381,7 +404,7 @@ class SynthEval():
         self._raw_results = raw_results
         return key_results
 
-    def benchmark(self, dfs_or_path: Dict[str, DataFrame] | str, analysis_target=None, presets_file=None, rank_strategy='summation', output_folder=None, **kwargs):
+    def benchmark(self, dfs_or_path: Dict[str, DataFrame] | str, analysis_target=None, presets_file=None, rank_strategy='summation', output_folder=None, plot_output_dir=None, **kwargs):
         """Method for running SynthEval multiple times across all synthetic data files in a
         specified directory. Making a results file, and calculating rank-derived utility 
         and privacy scores.
@@ -391,6 +414,12 @@ class SynthEval():
             analysis_target     : string column name of categorical variable to check, or an AnalysisConfig instance
             rank_strategy       : {default='summation', 'normal', 'quantile', 'linear'}, see descriptions below.
             output_folder       : (optional) path to folder where benchmark CSV results should be saved. Defaults to current directory.
+            plot_output_dir     : (optional) path to a folder under which one subfolder per dataset will be
+                                   created to hold SynthEval's native per-metric plots (``SE_*.png``). When set,
+                                   plotting is enabled for this run (honouring ``self.enable_plots``) instead of
+                                   being forced off, so plots come out of this same pass -- callers that need
+                                   native plots do not need to run a second, fully redundant benchmark/evaluate
+                                   pass just to regenerate them. Defaults to None (no plots, same as before).
 
         Deprecated:
             analysis_target_var : deprecated alias for analysis_target. Will be removed in a future release.
@@ -417,7 +446,13 @@ class SynthEval():
         # TODO: integrate the rich console with this method as well.
         # Part to avoid printing in the following and resetting to user preference after
         reset_verbose, reset_plotting, reset_console = self.verbose, self.enable_plots, self.console
-        self.verbose, self.enable_plots, self.console = False, False, 'off'
+        # Plotting is forced off by default (each evaluate() call runs in its own process
+        # below, and SynthEval's plot filenames are timestamp-based with no dataset name,
+        # so multiple datasets plotting into the same cwd could clobber each other's
+        # figures). When plot_output_dir is given we instead keep self.enable_plots as the
+        # caller set it and isolate each dataset's plots into their own subfolder (see below).
+        self.verbose, self.console = False, 'off'
+        self.enable_plots = reset_plotting if plot_output_dir is not None else False
 
         # Part to process the input
         if isinstance(dfs_or_path, str):
@@ -442,9 +477,36 @@ class SynthEval():
 
         # Evaluate the datasets in parallel
         from joblib import Parallel, delayed
+
+        # Resolve presets_file to an absolute path *before* any per-dataset chdir below
+        # (a relative path -- e.g. a json file, as opposed to a bare preset keyword like
+        # 'full_eval' -- would otherwise no longer point at the right file once the
+        # worker process has chdir-ed into a dataset's plot subfolder).
+        resolved_presets_file = presets_file
+        if (
+            plot_output_dir is not None
+            and presets_file is not None
+            and not _has_not_slash_backslash_or_dot(presets_file)
+        ):
+            resolved_presets_file = str(Path(presets_file).resolve())
+
+        def _evaluate_one(name, dataframe):
+            if plot_output_dir is None:
+                return self.evaluate(dataframe, analysis_target, resolved_presets_file, **metric_kwargs)
+            # Isolate this dataset's native plots into their own subfolder so
+            # concurrent (loky-process) evaluations don't clobber each other's
+            # timestamp-named PNGs by writing into the same cwd.
+            dataset_plot_dir = os.path.join(plot_output_dir, name)
+            os.makedirs(dataset_plot_dir, exist_ok=True)
+            original_dir = os.getcwd()
+            os.chdir(dataset_plot_dir)
+            try:
+                return self.evaluate(dataframe, analysis_target, resolved_presets_file, **metric_kwargs)
+            finally:
+                os.chdir(original_dir)
+
         res_list = Parallel(n_jobs=-2)(
-            delayed(self.evaluate)(dataframe, analysis_target, presets_file, **metric_kwargs)
-            for dataframe in df_dict.values()
+            delayed(_evaluate_one)(name, dataframe) for name, dataframe in df_dict.items()
         )
         
         results = {}

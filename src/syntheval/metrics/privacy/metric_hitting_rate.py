@@ -52,9 +52,20 @@ class HittingRate(MetricClass):
         thres = thres_percent*(self.real_data.max() - self.real_data.min())
         thres[self.cat_cols] = 0
 
+        # self.synt_data can have a different column ORDER than self.real_data
+        # (e.g. real/synthetic dataframes loaded from separate CSVs with their
+        # own on-disk column order) even when both have the exact same set of
+        # columns. Comparison dunder ops (DataFrame <= Series, used below) do
+        # NOT auto-align by label the way e.g. `.le()` does -- pandas raises
+        # "Operands are not aligned" if the Series' index and the DataFrame's
+        # columns carry the same labels in a different order. Reindexing here
+        # once guarantees synt_data lines up with real_data/thres (both of
+        # which follow self.real_data's column order) for every row below.
+        synt_data = self.synt_data[self.real_data.columns]
+
         hit = 0
         for i, r in self.real_data.iterrows():
-            hit += any((abs(r-self.synt_data) <= thres).all(axis='columns'))
+            hit += any((abs(r-synt_data) <= thres).all(axis='columns'))
         hit_rate = hit/len(self.real_data)
         self.results = {'hit rate': hit_rate}
         return self.results

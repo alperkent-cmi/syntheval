@@ -8,6 +8,11 @@ from syntheval.metrics.core.metric import MetricClass
 
 from syntheval.utils.nn_distance import _knn_distance
 
+# Below this many resample rounds, joblib's per-task process-pool dispatch
+# overhead (via the 'loky' backend) outweighs the benefit -- keep small/
+# doctest-sized inputs (e.g. n_resample=1) sequential.
+_PARALLEL_MIN_RESAMPLES = 5
+
 def _adversarial_score(real, fake, cat_cols, metric):
     """Function for calculating adversarial score
     
@@ -30,6 +35,17 @@ def _adversarial_score(real, fake, cat_cols, metric):
     left = np.mean(_knn_distance(real, fake, cat_cols, 1, metric)[0] > _knn_distance(real, real, cat_cols, 1, metric)[0])
     right = np.mean(_knn_distance(fake, real, cat_cols, 1, metric)[0] > _knn_distance(fake, fake, cat_cols, 1, metric)[0])
     return float(0.5 * (left + right))
+
+def _one_resample_round(real, fake, cat_cols, metric, sample_real, sample_fake):
+    """Run one resample-and-score round. Standalone module-level function
+    (rather than inlined in the loop) so it can be dispatched via joblib's
+    'loky' (process) backend -- each round is an independent random
+    subsample + adversarial-score computation, so the whole resample loop
+    is embarrassingly parallel.
+    """
+    temp_r = real.sample(n=len(fake)) if sample_real else real
+    temp_f = fake.sample(n=len(real)) if sample_fake else fake
+    return _adversarial_score(temp_r, temp_f, cat_cols, metric)
 
 def evaluate_dataset_nnaa(real, fake, num_cols, cat_cols, metric, n_resample):
     """Helper function for running adversarial score multiple times if the 
@@ -58,11 +74,18 @@ def evaluate_dataset_nnaa(real, fake, num_cols, cat_cols, metric, n_resample):
     fake_real = len(fake)/len(real)
 
     if any([real_fake >= 2, fake_real >= 2]):
-        aa_lst = []
-        for _ in range(n_resample):
-            temp_r = real if real_fake < 2 else real.sample(n=len(fake))
-            temp_f = fake if fake_real < 2 else fake.sample(n=len(real))
-            aa_lst.append(_adversarial_score(temp_r, temp_f, cat_cols, metric))
+        sample_real, sample_fake = real_fake >= 2, fake_real >= 2
+        if n_resample >= _PARALLEL_MIN_RESAMPLES:
+            from joblib import Parallel, delayed
+            aa_lst = Parallel(n_jobs=-2, backend='loky')(
+                delayed(_one_resample_round)(real, fake, cat_cols, metric, sample_real, sample_fake)
+                for _ in range(n_resample)
+            )
+        else:
+            aa_lst = [
+                _one_resample_round(real, fake, cat_cols, metric, sample_real, sample_fake)
+                for _ in range(n_resample)
+            ]
 
         avg = np.mean(aa_lst)
         err = np.std(aa_lst, ddof=1)/np.sqrt(len(aa_lst))

@@ -37,6 +37,7 @@ def plot_dimensionwise_means(means, sem, labels):
         plt.tight_layout()
         plt.grid(linestyle='--', alpha=0.5)
         plt.savefig('SE_dwm_' +str(int(time.time()))+'.png')
+        plt.close(fig)
     else:
         y = lambda x, a : a*x
         popt, pcov = curve_fit(y, means[:,0], means[:,1])
@@ -58,6 +59,7 @@ def plot_dimensionwise_means(means, sem, labels):
         plt.tight_layout()
         plt.grid(linestyle='--', alpha=0.3)
         plt.savefig('SE_dwm_' +str(int(time.time()))+'.png')
+        plt.close(fig)
     pass
 
 def plot_principal_components(reals, fakes):
@@ -79,6 +81,7 @@ def plot_principal_components(reals, fakes):
         fig.tight_layout()
         fig.subplots_adjust(right=0.85)
         plt.savefig('SE_pca_proj_' +str(int(time.time()))+'.png')
+        plt.close(fig)
     else:
         fig, axs = plt.subplots(comp_num, comp_num, figsize=(comp_num*3, comp_num*3), sharey=True, sharex=True)
         plt.suptitle("Synthetic (U) and real data (L) projected onto real data PCA components",fontsize=14)
@@ -135,6 +138,17 @@ def plot_own_principal_component_pairplot(data):
 def plot_significantly_dissimilar_variables(real, fake, labels, cat_cols):
     """Plot histograms of every attribute that is significantly unlike the one it is modelled on"""
 
+    # Cap how many columns get their own histogram subplot: on wide datasets
+    # (hundreds+ of columns) it's plausible for most columns to come back
+    # "significantly dissimilar" for an imperfect synthetic generator, and
+    # plotting all of them creates an unboundedly tall figure (nrows scales
+    # linearly with len(labels)) that is both illegible and a real memory/
+    # crash risk (observed a SIGKILL of the whole worker process on a
+    # 1038-column dataset before this cap was added). 100 is already more
+    # than useful to skim as a diagnostic.
+    _MAX_SIG_HIST_COLS = 100
+    labels = labels[:_MAX_SIG_HIST_COLS]
+
     df = stack(real, fake)
 
     plt.rc('font', size=6)
@@ -149,8 +163,10 @@ def plot_significantly_dissimilar_variables(real, fake, labels, cat_cols):
         axes[i].set_title(f'Variable {column}',fontsize=8)
         
     plt.tight_layout()
-    plt.savefig('SE_sig_hists_' +str(int(time.time()))+ '.png')
-    plt.close()
+    try:
+        plt.savefig('SE_sig_hists_' +str(int(time.time()))+ '.png')
+    finally:
+        plt.close(fig)
     pass
 
 def _shortened_labels(ax_get_ticks):
@@ -160,18 +176,41 @@ def _shortened_labels(ax_get_ticks):
 
 def plot_matrix_heatmap(mat,title,file_name,axs_lim,axs_scale):
     """Plotting difference matrix heatmap"""
-    s = max(8,int(np.shape(mat)[0]/3))
+    # Cap the figure size: the naive n/3 scaling is fine for the small/medium
+    # matrices this was designed for, but for wide datasets (hundreds+ of
+    # columns) it produces an unreadable, extremely expensive-to-render
+    # canvas (e.g. ~346x346 inches for a 1038x1038 matrix -- tens of GB of
+    # raster buffer), which risks OOM-killing the process. 40in is already
+    # far more than enough to be legible at that point anyway.
+    n = np.shape(mat)[0]
+    s = min(max(8,int(n/3)), 40)
+    # Per-cell tick labels become illegible past a certain column count
+    # regardless of figure size, and forcing seaborn to label every one of
+    # e.g. 1038 columns in a capped-size figure causes it to auto-thin ticks
+    # in a way that can desync tick positions from tick labels between the
+    # get_xticklabels()/get_xticks() calls below (matplotlib raises "number
+    # of FixedLocator locations does not match the number of labels"). Just
+    # skip per-cell labels past that point instead of fighting seaborn's
+    # auto-thinning.
+    show_labels = n <= 60
     fig, ax = plt.subplots(figsize=(s,s))
-    if s <= 8: sns.heatmap(mat, annot=True, fmt='.2f', cmap=axs_scale, ax=ax, cbar=True, mask=np.triu(np.ones(mat.shape), k=1))
-    else: sns.heatmap(mat, cmap=axs_scale, ax=ax, cbar=True, mask=np.triu(np.ones(mat.shape), k=1))
+    if s <= 8: sns.heatmap(mat, annot=True, fmt='.2f', cmap=axs_scale, ax=ax, cbar=True, mask=np.triu(np.ones(mat.shape), k=1), xticklabels=show_labels, yticklabels=show_labels)
+    else: sns.heatmap(mat, cmap=axs_scale, ax=ax, cbar=True, mask=np.triu(np.ones(mat.shape), k=1), xticklabels=show_labels, yticklabels=show_labels)
     if axs_scale is not None: ax.collections[0].set_clim(axs_lim) 
 
     plt.title(title)
-    labels = _shortened_labels(ax.get_xticklabels())
-    ax.set_xticks(ax.get_xticks(), labels, rotation=35, ha='right')
-    ax.set_yticks(ax.get_yticks(), labels)
+    if show_labels:
+        labels = _shortened_labels(ax.get_xticklabels())
+        ax.set_xticks(ax.get_xticks(), labels, rotation=35, ha='right')
+        ax.set_yticks(ax.get_yticks(), labels)
     fig.tight_layout()
-    plt.savefig('SE_' +file_name +'_' +str(int(time.time()))+ '.png')
+    try:
+        plt.savefig('SE_' +file_name +'_' +str(int(time.time()))+ '.png')
+    finally:
+        # Always close, even on failure -- an unclosed figure from a mid-plot
+        # exception leaks for the lifetime of the process (matplotlib keeps
+        # all created figures registered globally until explicitly closed).
+        plt.close(fig)
 
     pass
 
@@ -193,6 +232,7 @@ def plot_roc_curves(real_roc_mean, real_roc_conf, fake_roc, fake_roc_conf, title
     plt.title(f'ROC Curves for {title}')
     plt.legend(loc='lower right')
     plt.savefig('SE_' + file_name +'_' +str(int(time.time()))+ '.png')
+    plt.close()
     
     pass
 

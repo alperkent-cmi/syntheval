@@ -20,6 +20,11 @@ from sklearn.svm import SVC
 from typing import Literal
 from syntheval.metrics.core.metric import MetricClass
 
+# Below this many folds, joblib's per-task process-pool dispatch overhead
+# (via the 'loky' backend) outweighs the benefit -- keep small/doctest-sized
+# inputs (e.g. k_folds=2) sequential.
+_PARALLEL_MIN_FOLDS = 3
+
 model_name_dict = {
     'dt': 'DecisionTreeClassifier',
     'svm': 'SupportVectorMachine',
@@ -101,6 +106,28 @@ def class_test(real_models, fake_models, real, fake, test, F1_type):
 
         res.append([f1_real, f1_fake])
     return np.array(res).T
+
+def _evaluate_one_fold(
+    train_index_real, test_index_real, train_index_fake,
+    real_x_sub, real_y_sub, fake_x_sub, fake_y_sub,
+    real_models, fake_models, F1_type,
+):
+    """Run class_test for a single CV fold. Standalone module-level function
+    (rather than inlined in the loop) so it can be dispatched via joblib's
+    'loky' (process) backend -- each fold's train/test split and model
+    fit/predict is fully independent of every other fold.
+    """
+    real_x_train, real_y_train = real_x_sub.iloc[train_index_real], real_y_sub.iloc[train_index_real]
+    real_x_test, real_y_test = real_x_sub.iloc[test_index_real], real_y_sub.iloc[test_index_real]
+    fake_x_train, fake_y_train = fake_x_sub.iloc[train_index_fake], fake_y_sub.iloc[train_index_fake]
+    return class_test(
+        real_models,
+        fake_models,
+        [real_x_train, real_y_train],
+        [fake_x_train, fake_y_train],
+        [real_x_test, real_y_test],
+        F1_type,
+    )
 
 class ClassificationAccuracy(MetricClass):
     """The Metric Class is an abstract class that interfaces with 
@@ -195,31 +222,29 @@ class ClassificationAccuracy(MetricClass):
             fake_models = [_get_model(model_name) for model_name in cls_models]
             target_var = target_var.replace(' ', '_').lower()
 
-            res = []
             max_len = max(len(real_y), len(fake_y))
             real_x_sub, real_y_sub = resample(real_x, real_y, n_samples=max_len, stratify=real_y, random_state=42)
             fake_x_sub, fake_y_sub = resample(fake_x, fake_y, n_samples=max_len, stratify=fake_y, random_state=42)
 
             kf = StratifiedKFold(n_splits=k_folds, random_state=42, shuffle=True)
-            split_iter = zip(kf.split(real_x_sub, real_y_sub), kf.split(fake_x_sub, fake_y_sub))
+            splits = list(zip(kf.split(real_x_sub, real_y_sub), kf.split(fake_x_sub, fake_y_sub)))
+            fold_args = [
+                (train_index_real, test_index_real, train_index_fake,
+                 real_x_sub, real_y_sub, fake_x_sub, fake_y_sub,
+                 real_models, fake_models, F1_type)
+                for (train_index_real, test_index_real), (train_index_fake, _) in splits
+            ]
 
-            for (train_index_real, test_index_real), (train_index_fake, _) in tqdm(
-                split_iter, desc='cls_acc', total=k_folds, disable=not self.verbose,
-                ):
-                real_x_train, real_y_train = real_x_sub.iloc[train_index_real], real_y_sub.iloc[train_index_real]
-                real_x_test, real_y_test = real_x_sub.iloc[test_index_real], real_y_sub.iloc[test_index_real]
-                fake_x_train, fake_y_train = fake_x_sub.iloc[train_index_fake], fake_y_sub.iloc[train_index_fake]
-
-                res.append(
-                    class_test(
-                        real_models,
-                        fake_models,
-                        [real_x_train, real_y_train],
-                        [fake_x_train, fake_y_train],
-                        [real_x_test, real_y_test],
-                        F1_type,
-                    )
+            if len(fold_args) >= _PARALLEL_MIN_FOLDS:
+                from joblib import Parallel, delayed
+                res = Parallel(n_jobs=-2, backend='loky')(
+                    delayed(_evaluate_one_fold)(*args) for args in fold_args
                 )
+            else:
+                res = [
+                    _evaluate_one_fold(*args)
+                    for args in tqdm(fold_args, desc='cls_acc', disable=not self.verbose)
+                ]
 
             class_avg = np.mean(res, axis=0)
             class_err = np.std(res, axis=0, ddof=1) / np.sqrt(k_folds) if k_folds > 1 else np.zeros_like(class_avg)

@@ -11,6 +11,12 @@ from scipy.stats import permutation_test, ks_2samp
 
 from syntheval.utils.plot_metrics import plot_significantly_dissimilar_variables
 
+# Below this many columns, per-column joblib dispatch overhead (process pool
+# startup for the 'loky' backend) outweighs the benefit -- keep small/doctest
+# inputs sequential. Matches the threshold used for corr_diff/mi_diff, which
+# have the same "independent per-column work" shape.
+_PARALLEL_MIN_COLS = 50
+
 def _total_variation_distance(x,y):
     """Function for calculating the TVD (KS statistic equivalent)
     
@@ -49,6 +55,23 @@ def _discrete_ks(x, y, n_perms=1000):
     res = permutation_test((x, y), _total_variation_distance, n_resamples=n_perms, vectorized=False, permutation_type='independent', alternative='greater')
 
     return float(res.statistic), float(res.pvalue)
+
+def _evaluate_one_column(category, R, F, is_categorical, n_perms):
+    """Run the (discrete or continuous) KS test for a single column.
+
+    Standalone module-level function (rather than a method/closure) so it
+    can be dispatched via joblib's 'loky' (process) backend without needing
+    to pickle the whole metric instance -- only the two column Series are
+    sent to the worker.
+
+    Returns (category, is_categorical, statistic, pvalue).
+    """
+    if is_categorical:
+        statistic, pvalue = _discrete_ks(F, R, n_perms)
+    else:
+        KstestResult = ks_2samp(R, F)
+        statistic, pvalue = KstestResult.statistic, KstestResult.pvalue
+    return category, is_categorical, statistic, pvalue
 
 class KolmogorovSmirnovTest(MetricClass):
     """The Metric Class is an abstract class that interfaces with 
@@ -97,19 +120,25 @@ class KolmogorovSmirnovTest(MetricClass):
         
         self.sig_lvl = sig_lvl
 
-        for category in self.real_data.columns:
-            R = self.real_data[category]
-            F = self.synt_data[category]
+        columns = list(self.real_data.columns)
+        cat_col_set = set(self.cat_cols)
+        tasks = [
+            (category, self.real_data[category], self.synt_data[category], category in cat_col_set, n_perms)
+            for category in columns
+        ]
 
-            if category in self.cat_cols:
-                statistic, pvalue = _discrete_ks(F,R,n_perms)
+        if len(columns) >= _PARALLEL_MIN_COLS:
+            from joblib import Parallel, delayed
+            results = Parallel(n_jobs=-2, backend='loky')(delayed(_evaluate_one_column)(*task) for task in tasks)
+        else:
+            results = [_evaluate_one_column(*task) for task in tasks]
+
+        for category, is_categorical, statistic, pvalue in results:
+            if is_categorical:
                 c_dists.append(statistic)
-                pvals.append(pvalue)
             else:
-                KstestResult = ks_2samp(R,F)
-                statistic, pvalue = KstestResult.statistic, KstestResult.pvalue
                 n_dists.append(statistic)
-                pvals.append(pvalue)
+            pvals.append(pvalue)
             if pvalue < sig_lvl:
                 sig_cols.append(category)
 

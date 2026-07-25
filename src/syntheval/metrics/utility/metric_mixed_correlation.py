@@ -5,10 +5,16 @@
 import numpy as np
 import pandas as pd
 
+from joblib import Parallel, delayed
+
 from syntheval.metrics.core.metric import MetricClass
 
 from scipy.stats import chi2_contingency
 from syntheval.utils.plot_metrics import plot_matrix_heatmap
+
+#: Below this column count, the row-parallel path isn't worth the loky
+#: process-pool overhead (~0.1-0.5s) -- e.g. small doctest-sized inputs.
+_PARALLEL_MIN_COLS = 50
 
 def _cramers_V(var1,var2) :
     """function for calculating Cramers V between two categorial variables
@@ -49,8 +55,41 @@ def _apply_mat(data,func,labs1,labs2):
         a  1.0  1.0
         b  1.0  1.0
     """
-    res = (func(data[lab1],data[lab2]) for lab1 in labs1 for lab2 in labs2)
-    return pd.DataFrame(np.fromiter(res, dtype=float).reshape(len(labs1),len(labs2)), columns = labs2, index = labs1)
+    # Process-based (loky) parallelism, split one task per row -- threads were
+    # measured *slower* than sequential for these funcs (pandas/scipy overhead
+    # doesn't release the GIL enough), while loky gave ~8x on a 24-core
+    # machine. n_jobs=-2 matches the outer `benchmark()` Parallel's own choice
+    # (leaves one core free); safe to nest -- joblib does not force this back
+    # to sequential just because it's called from inside another Parallel.
+    # Below `_PARALLEL_MIN_COLS` the pool startup isn't worth it, so fall back
+    # to a plain sequential loop (e.g. doctest-sized inputs).
+    n1, n2 = len(labs1), len(labs2)
+    use_parallel = max(n1, n2) >= _PARALLEL_MIN_COLS
+
+    if labs1 == labs2:
+        # Same label set on both axes -> the matrix is symmetric for both funcs
+        # this helper is called with here (_cramers_V and mutual information),
+        # so only the upper triangle needs computing -- halves the O(d^2) calls
+        # that dominate wide datasets (e.g. loris's 822 categorical columns).
+        n = n1
+        def _row(i):
+            return [func(data[labs1[i]], data[labs2[j]]) for j in range(i, n)]
+
+        rows = (Parallel(n_jobs=-2, backend='loky')(delayed(_row)(i) for i in range(n))
+                if use_parallel else [_row(i) for i in range(n)])
+        mat = np.empty((n, n), dtype=float)
+        for i, row in enumerate(rows):
+            for k, j in enumerate(range(i, n)):
+                mat[i, j] = row[k]
+                mat[j, i] = row[k]
+        return pd.DataFrame(mat, columns=labs2, index=labs1)
+
+    def _row_full(lab1):
+        return [func(data[lab1], data[lab2]) for lab2 in labs2]
+
+    rows = (Parallel(n_jobs=-2, backend='loky')(delayed(_row_full)(lab1) for lab1 in labs1)
+            if use_parallel else [_row_full(lab1) for lab1 in labs1])
+    return pd.DataFrame(np.array(rows, dtype=float).reshape(n1, n2), columns=labs2, index=labs1)
 
 def _correlation_ratio(categories, measurements):
     """Function for calculating the correlation ration eta^2 of categorial and nummerical data

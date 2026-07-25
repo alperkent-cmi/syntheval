@@ -5,10 +5,16 @@
 import numpy as np
 import pandas as pd
 
+from joblib import Parallel, delayed
+
 from syntheval.metrics.core.metric import MetricClass
 
 from syntheval.utils.plot_metrics import plot_matrix_heatmap
 from sklearn.metrics import normalized_mutual_info_score
+
+#: Below this column count, the row-parallel path isn't worth the loky
+#: process-pool overhead (~0.1-0.5s) -- e.g. small doctest-sized inputs.
+_PARALLEL_MIN_COLS = 50
 
 def _pairwise_attributes_mutual_information(data):
     """Compute normalized mutual information for all pairwise attributes.
@@ -31,8 +37,38 @@ def _pairwise_attributes_mutual_information(data):
         b  1.0  1.0
     """
     labs = sorted(data.columns)
-    res = (normalized_mutual_info_score(data[cat1].astype(str),data[cat2].astype(str),average_method='arithmetic') for cat1 in labs for cat2 in labs)
-    return pd.DataFrame(np.fromiter(res, dtype=float).reshape(len(labs),len(labs)), columns = labs, index = labs)
+    n = len(labs)
+
+    # Encode each column to string once up front (same semantics as the previous
+    # per-pair `.astype(str)` -- NaNs still collapse to the shared 'nan' string
+    # category) instead of re-casting/relabeling it for every pair it appears
+    # in. That was O(d^2) redundant string work (e.g. d=1038 -> ~2M wasted
+    # casts) instead of O(d); this is the dominant cost at large d.
+    codes = {lab: pd.factorize(data[lab].astype(str))[0] for lab in labs}
+
+    # normalized_mutual_info_score(a, b) == normalized_mutual_info_score(b, a),
+    # so only the upper triangle (incl. diagonal) needs computing -- halves
+    # the number of pairwise calls.
+    def _row(i):
+        return [normalized_mutual_info_score(codes[labs[i]], codes[labs[j]], average_method='arithmetic') for j in range(i, n)]
+
+    if n >= _PARALLEL_MIN_COLS:
+        # Process-based (loky) parallelism -- threads were measured *slower*
+        # than sequential here (sklearn/pandas overhead doesn't release the
+        # GIL enough), while loky gave ~8x on a 24-core machine. n_jobs=-2
+        # matches the outer `benchmark()` Parallel's own choice (leaves one
+        # core free); safe to nest -- joblib does not force this back to
+        # sequential just because it's called from inside another Parallel.
+        rows = Parallel(n_jobs=-2, backend='loky')(delayed(_row)(i) for i in range(n))
+    else:
+        rows = [_row(i) for i in range(n)]
+
+    mat = np.empty((n, n), dtype=float)
+    for i, row in enumerate(rows):
+        for k, j in enumerate(range(i, n)):
+            mat[i, j] = row[k]
+            mat[j, i] = row[k]
+    return pd.DataFrame(mat, columns=labs, index=labs)
 
 class MutualInformation(MetricClass):
 
