@@ -96,6 +96,66 @@ def _add_key_results(key_results, key_result):
         key_results = pd.concat((key_results, tmp_df), axis=0).reset_index(drop=True)
     return key_results
 
+
+def aggregate_benchmark_results(results, rank_strategy='summation'):
+    """Build benchmark value/error tables and global ranks from model results.
+
+    ``results`` maps model names to the normalised DataFrame returned by
+    :meth:`SynthEval.evaluate`. Ranking is deliberately performed only after
+    every model result is available: applying min-max ranking to independent
+    execution batches would produce different, invalid ranks.
+    """
+    if not results:
+        raise ValueError("Cannot aggregate an empty benchmark result mapping")
+
+    tmp_df = next(iter(results.values()))
+    if tmp_df is None:
+        raise ValueError("Cannot aggregate a benchmark result with no metric rows")
+
+    utility_mets = tmp_df[tmp_df['dim'] == 'u']['metric'].tolist()
+    privacy_mets = tmp_df[tmp_df['dim'] == 'p']['metric'].tolist()
+    fairness_mets = tmp_df[tmp_df['dim'] == 'f']['metric'].tolist()
+
+    vals_df = pd.DataFrame(columns=tmp_df['metric'])
+    errs_df = pd.DataFrame(columns=tmp_df['metric'])
+    rank_df = pd.DataFrame(columns=tmp_df['metric'])
+
+    for key, df in results.items():
+        df = df.set_index('metric').T
+        vals_df.loc[len(vals_df)] = df.loc['val']
+        errs_df.loc[len(errs_df)] = df.loc['err']
+        rank_df.loc[len(rank_df)] = df.loc['n_val']
+
+    vals_df['dataset'] = list(results.keys())
+    errs_df['dataset'] = list(results.keys())
+    rank_df['dataset'] = list(results.keys())
+
+    vals_df = vals_df.set_index('dataset')
+    errs_df = errs_df.set_index('dataset')
+    rank_df = rank_df.set_index('dataset')
+
+    match rank_strategy:
+        case 'normal': rank_df = extremes_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
+        case 'linear': rank_df = linear_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
+        case 'quantile': rank_df = quantile_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
+        case 'summation': rank_df = summation_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
+        case _: raise ValueError(f"Unrecognised rank_strategy: {rank_strategy!r}")
+
+    comb_df = pd.DataFrame(index=vals_df.index)
+    for column in vals_df.columns:
+        comb_df[(column, 'value')] = vals_df[column]
+        comb_df[(column, 'error')] = errs_df[column]
+    comb_df.columns = pd.MultiIndex.from_tuples(comb_df.columns)
+
+    comb_df['rank'] = rank_df['rank']
+    if utility_mets:
+        comb_df['u_rank'] = rank_df['u_rank']
+    if privacy_mets:
+        comb_df['p_rank'] = rank_df['p_rank']
+    if fairness_mets:
+        comb_df['f_rank'] = rank_df['f_rank']
+    return comb_df, rank_df
+
 class SynthEval():
     """Primary object for accessing the SynthEval evaluation framework. Create with the real data used for training
     and use either evaluate of benchmark methods for evaluating synthetic datasets.
@@ -410,7 +470,7 @@ class SynthEval():
         self._raw_results = raw_results
         return key_results
 
-    def benchmark(self, dfs_or_path: Dict[str, DataFrame] | str, analysis_target=None, presets_file=None, rank_strategy='summation', output_folder=None, plot_output_dir=None, **kwargs):
+    def benchmark(self, dfs_or_path: Dict[str, DataFrame] | str, analysis_target=None, presets_file=None, rank_strategy='summation', output_folder=None, plot_output_dir=None, n_jobs=-2, **kwargs):
         """Method for running SynthEval multiple times across all synthetic data files in a
         specified directory. Making a results file, and calculating rank-derived utility 
         and privacy scores.
@@ -426,6 +486,8 @@ class SynthEval():
                                    being forced off, so plots come out of this same pass -- callers that need
                                    native plots do not need to run a second, fully redundant benchmark/evaluate
                                    pass just to regenerate them. Defaults to None (no plots, same as before).
+            n_jobs              : number of concurrent dataset evaluations. Defaults to -2 (all available
+                                  CPUs minus one), preserving legacy behavior.
 
         Deprecated:
             analysis_target_var : deprecated alias for analysis_target. Will be removed in a future release.
@@ -511,59 +573,17 @@ class SynthEval():
             finally:
                 os.chdir(original_dir)
 
-        res_list = Parallel(n_jobs=-2)(
+        res_list = Parallel(n_jobs=n_jobs)(
             delayed(_evaluate_one)(name, dataframe) for name, dataframe in df_dict.items()
         )
         
         results = {}
         for res, key in zip(res_list,list(df_dict.keys())): results[key] = res
 
-        # Part to postprocess the results, format and rank them in a csv file.
-        tmp_df = results[list(results.keys())[0]]
-
-        utility_mets = tmp_df[tmp_df['dim'] == 'u']['metric'].tolist()
-        privacy_mets = tmp_df[tmp_df['dim'] == 'p']['metric'].tolist()
-        fairness_mets = tmp_df[tmp_df['dim'] == 'f']['metric'].tolist()
-
-        vals_df = pd.DataFrame(columns=tmp_df['metric'])
-        errs_df = pd.DataFrame(columns=tmp_df['metric'])
-        rank_df = pd.DataFrame(columns=tmp_df['metric'])
-
-        for key, df in results.items():
-            df = df.set_index('metric').T
-
-            vals_df.loc[len(vals_df)] = df.loc['val']
-            errs_df.loc[len(vals_df)] = df.loc['err']
-            rank_df.loc[len(vals_df)] = df.loc['n_val']
-
-        vals_df['dataset'] = list(results.keys())
-        errs_df['dataset'] = list(results.keys())
-        rank_df['dataset'] = list(results.keys())
-
-        vals_df = vals_df.set_index('dataset')
-        errs_df = errs_df.set_index('dataset')
-        rank_df = rank_df.set_index('dataset')
-
-        match rank_strategy:
-            case 'normal': rank_df = extremes_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
-            case 'linear': rank_df = linear_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
-            case 'quantile': rank_df = quantile_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
-            case 'summation': rank_df = summation_ranking(rank_df, utility_mets, privacy_mets, fairness_mets)
-            case _: raise Exception("Error: unrecognised rank_strategy keyword!")
-
-        comb_df = pd.DataFrame()
-        for column in vals_df.columns:
-            comb_df[(column, 'value')] = vals_df[column]
-            comb_df[(column, 'error')] = errs_df[column]
-        comb_df.columns = pd.MultiIndex.from_tuples(comb_df.columns)
-
-        comb_df['rank'] = rank_df['rank']
-        if utility_mets != []:
-            comb_df['u_rank'] = rank_df['u_rank']
-        if privacy_mets != []:
-            comb_df['p_rank'] = rank_df['p_rank']
-        if fairness_mets != []:
-            comb_df['f_rank'] = rank_df['f_rank']
+        # Rank once across the complete model population. This helper is also
+        # used by SynthData's resumable per-model scheduler.
+        comb_df, rank_df = aggregate_benchmark_results(results, rank_strategy)
+        vals_df = comb_df.xs('value', axis=1, level=1)
 
         name_tag = str(int(time.time()))
         temp_df = comb_df.copy()
