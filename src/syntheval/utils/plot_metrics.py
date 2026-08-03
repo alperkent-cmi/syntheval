@@ -14,6 +14,8 @@ from scipy.optimize import curve_fit
 
 from syntheval.utils.preprocessing import stack
 
+_MAX_CONTINUOUS_HIST_BINS = 100
+
 # params = {'text.usetex' : True,
 #           'font.size' : 14,
 #           'font.family' : 'lmodern'
@@ -158,7 +160,16 @@ def plot_significantly_dissimilar_variables(real, fake, labels, cat_cols):
     for i, column in enumerate(labels):
         
         if column in cat_cols: sns.histplot(data=df, x=column, hue='real', stat='probability', common_norm=False, discrete=True, multiple="dodge", alpha=0.5, shrink=.8, ax=axes[i])
-        else: sns.histplot(data=df, x=column, hue='real', stat='probability', common_norm=False, multiple="layer", alpha=0.5, shrink=.8, ax=axes[i])
+        else:
+            # Seaborn's automatic estimator can request millions of bins when
+            # near-tied floating-point values make the IQR vanishingly small.
+            # Bound the diagnostic plot by the observed cardinality and keep
+            # wide datasets from allocating an unbounded histogram buffer.
+            histogram_bins = min(
+                _MAX_CONTINUOUS_HIST_BINS,
+                max(1, int(df[column].nunique(dropna=True))),
+            )
+            sns.histplot(data=df, x=column, hue='real', stat='probability', common_norm=False, bins=histogram_bins, multiple="layer", alpha=0.5, shrink=.8, ax=axes[i])
         
         axes[i].set_title(f'Variable {column}',fontsize=8)
         
