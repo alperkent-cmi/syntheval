@@ -28,6 +28,10 @@ from syntheval.metrics.utility.metric_propensity_mse import (
     normalize_pmse_v2,
 )
 from syntheval.metrics.utility.metric_quantile_mse import QuantileMSE
+from syntheval.metrics.utility.metric_max_mean_discrepancy import (
+    MaximumMeanDiscrepancy,
+    mixed_rbf_mmd_v2,
+)
 
 
 def test_auroc_v2_is_signed_and_zero_difference_is_perfect_agreement():
@@ -229,3 +233,106 @@ def test_ks_v2_is_full_precision_seeded_and_reports_valid_tests():
     assert result['ks_invalid_tests_v2'] == 1
     assert 'empty' in result['ks_invalid_columns_v2']
     assert metric.normalize_output_v2()[0]['metadata']['valid_tests'] == 2
+
+
+def test_mmd_v2_identical_frames_are_perfect_and_exposes_audit_estimate():
+    frame = pd.DataFrame({'x': [0.0, 1.0, 2.0], 'rank': [1, 2, 3], 'kind': ['a', 'b', 'a']})
+    result = mixed_rbf_mmd_v2(frame, frame.copy(), continuous_columns=['x'],
+                              ordinal_columns=['rank'], nominal_columns=['kind'])
+    assert result['score'] == 1.0
+    assert result['b_mmd'] == 0.0
+    assert np.isfinite(result['u_mmd'])
+    assert result['fit_role'] == 'train'
+
+
+def test_mmd_v2_nominal_recoding_does_not_change_result():
+    train = pd.DataFrame({'kind': ['low', 'high', 'low']})
+    candidate = pd.DataFrame({'kind': ['high', 'low', 'high']})
+    recoded_train = train.replace({'low': 100, 'high': -4})
+    recoded_candidate = candidate.replace({'low': 100, 'high': -4})
+    first = mixed_rbf_mmd_v2(train, candidate, nominal_columns=['kind'])
+    second = mixed_rbf_mmd_v2(recoded_train, recoded_candidate, nominal_columns=['kind'])
+    assert first['b_mmd'] == second['b_mmd']
+
+
+def test_mmd_v2_ordinal_distance_is_sensitive_and_fit_bandwidth_is_train_only():
+    train = pd.DataFrame({'rank': [0, 1, 2]})
+    near = pd.DataFrame({'rank': [0, 1, 2]})
+    far = pd.DataFrame({'rank': [2, 2, 2]})
+    near_result = mixed_rbf_mmd_v2(train, near, ordinal_columns=['rank'])
+    far_result = mixed_rbf_mmd_v2(train, far, ordinal_columns=['rank'])
+    assert near_result['b_mmd'] < far_result['b_mmd']
+    with_tuning = mixed_rbf_mmd_v2(train, far, ordinal_columns=['rank'],
+                                   tuning=pd.DataFrame({'rank': [100]}), fit_role='final')
+    assert with_tuning['fit_role'] == 'train+tuning'
+    assert with_tuning['bandwidth'] != near_result['bandwidth']
+
+
+def test_mmd_v2_uses_declared_ordinal_order_and_rejects_unknown_or_null_values():
+    train = pd.DataFrame({'rank': ['middle', 'low', 'high']})
+    result = mixed_rbf_mmd_v2(train, train.copy(), ordinal_columns=['rank'],
+                              ordinal_orders={'rank': ['low', 'middle', 'high']})
+    assert result['score'] == 1.0
+    with pytest.raises(ValueError, match='unseen values'):
+        mixed_rbf_mmd_v2(train, pd.DataFrame({'rank': ['other']}), ordinal_columns=['rank'],
+                         ordinal_orders={'rank': ['low', 'middle', 'high']})
+    with pytest.raises(ValueError, match='null'):
+        mixed_rbf_mmd_v2(train, pd.DataFrame({'rank': [None]}), ordinal_columns=['rank'],
+                         ordinal_orders={'rank': ['low', 'middle', 'high']})
+
+
+def test_mmd_v2_rejects_bad_continuous_values_schema_and_weights():
+    train = pd.DataFrame({'x': [0.0, 1.0]})
+    with pytest.raises(ValueError, match='finite'):
+        mixed_rbf_mmd_v2(train, pd.DataFrame({'x': [np.inf]}), continuous_columns=['x'])
+    with pytest.raises(KeyError, match='missing schema'):
+        mixed_rbf_mmd_v2(train, pd.DataFrame({'y': [1.0]}), continuous_columns=['x'])
+    with pytest.raises(ValueError, match='fixed equal weights'):
+        mixed_rbf_mmd_v2(train, train.copy(), continuous_columns=['x'], weights={'continuous': 0})
+    with pytest.raises(ValueError, match='fixed equal weights'):
+        mixed_rbf_mmd_v2(train, train.copy(), continuous_columns=['x'], weights={'continuous': 1, 'unknown': 0})
+
+
+def test_mmd_v2_candidate_and_final_fit_roles_are_explicit():
+    train = pd.DataFrame({'x': [0.0, 1.0, 2.0]})
+    tuning = pd.DataFrame({'x': [100.0]})
+    candidate = mixed_rbf_mmd_v2(train, train.copy(), continuous_columns=['x'])
+    final = mixed_rbf_mmd_v2(train, train.copy(), continuous_columns=['x'],
+                             tuning=tuning, fit_role='final')
+    assert candidate['fit_role'] == 'train'
+    assert final['fit_role'] == 'train+tuning'
+    with pytest.raises(ValueError, match='must not receive tuning'):
+        mixed_rbf_mmd_v2(train, train.copy(), continuous_columns=['x'], tuning=tuning)
+
+
+def test_mmd_v2_final_mode_uses_combined_reference_for_all_kernel_terms():
+    train = pd.DataFrame({'x': [0.0, 1.0]})
+    tuning = pd.DataFrame({'x': [10.0]})
+    combined = pd.concat([train, tuning], ignore_index=True)
+    final_match = mixed_rbf_mmd_v2(train, combined, continuous_columns=['x'],
+                                   tuning=tuning, fit_role='final')
+    final_train_only = mixed_rbf_mmd_v2(train, train.copy(), continuous_columns=['x'],
+                                        tuning=tuning, fit_role='final')
+    assert final_match['b_mmd'] == 0.0
+    assert final_match['b_mmd_raw'] == 0.0
+    assert final_train_only['b_mmd'] > 0.0
+
+
+def test_mmd_v2_supports_singletons_for_biased_audit_only():
+    result = mixed_rbf_mmd_v2(pd.DataFrame({'x': [0.0]}), pd.DataFrame({'x': [0.0]}),
+                              continuous_columns=['x'])
+    assert result['b_mmd'] == 0.0
+    assert np.isnan(result['u_mmd'])
+
+
+def test_mmd_v2_rejects_invalid_populations_and_keeps_biased_primary():
+    result = mixed_rbf_mmd_v2(pd.DataFrame({'x': [0, 1]}), pd.DataFrame({'x': [0]}), continuous_columns=['x'])
+    assert np.isnan(result['u_mmd'])
+    assert np.isfinite(result['b_mmd'])
+
+
+def test_mmd_metric_v2_api_returns_higher_is_better_score():
+    frame = pd.DataFrame({'x': [0.0, 1.0, 2.0]})
+    metric = MaximumMeanDiscrepancy(frame, frame.copy(), cat_cols=[], num_cols=['x'],
+                                    do_preprocessing=False, verbose=False, plot_figures=False)
+    assert metric.evaluate(version='mixed_rbf_mmd_v2', use_cats=False)['score'] == 1.0

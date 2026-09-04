@@ -3,11 +3,95 @@
 # Date: 06-02-2026
 
 import numpy as np
+import pandas as pd
 
 from syntheval.metrics.core.metric import MetricClass
 from typing import List, Literal
 
 from scipy.spatial.distance import cdist
+from syntheval.utils.preprocessing import MixedSchemaPreprocessor
+
+
+def _mixed_kernel(left, right, bandwidth, weights):
+    """Build role-safe mixed-schema RBF kernel from component distances."""
+    distance = np.zeros((len(left["continuous"]), len(right["continuous"])), dtype=float)
+    for role in ("continuous", "ordinal"):
+        if left[role].shape[1]:
+            distance += weights[role] * cdist(left[role], right[role], "sqeuclidean")
+    if left["nominal"].shape[1]:
+        nominal = np.zeros_like(distance)
+        for column in range(left["nominal"].shape[1]):
+            nominal += left["nominal"][:, column, None] != right["nominal"][None, :, column]
+        distance += weights["nominal"] * nominal
+    return np.exp(-distance / (2.0 * bandwidth**2))
+
+
+def mixed_rbf_mmd_v2(train, candidate, *, continuous_columns=None,
+                     ordinal_columns=None, nominal_columns=None,
+                     ordinal_orders=None, tuning=None, fit_role="candidate", weights=None):
+    """Calculate mixed-schema RBF MMD using state fitted on train roles.
+
+    ``tuning`` is optional. When supplied, final fit state uses train+tuning;
+    candidate representation and bandwidth otherwise use train only. Returned
+    ``b_mmd`` is primary; ``u_mmd`` is retained for audit only.
+    """
+    if fit_role not in ("candidate", "final"):
+        raise ValueError("fit_role must be 'candidate' or 'final'.")
+    if train.empty or candidate.empty:
+        raise ValueError("MMD v2 requires non-empty train and candidate populations.")
+    if fit_role == "final" and (tuning is None or tuning.empty):
+        raise ValueError("Final MMD v2 mode requires non-empty tuning data.")
+    if fit_role == "candidate" and tuning is not None:
+        raise ValueError("Candidate MMD v2 mode must not receive tuning data.")
+    continuous_columns = list(continuous_columns or [])
+    ordinal_columns = list(ordinal_columns or [])
+    nominal_columns = list(nominal_columns or [])
+    fit_frame = pd.concat([train, tuning], ignore_index=True) if fit_role == "final" else train
+    preprocessor = MixedSchemaPreprocessor.fit(
+        fit_frame, continuous_columns, ordinal_columns, nominal_columns, ordinal_orders
+    )
+    train_values = preprocessor.transform(train, role="train")
+    candidate_values = preprocessor.transform(candidate, role="candidate")
+    fit_values = preprocessor.transform(fit_frame, role=fit_role)
+    active = [role for role, values in fit_values.items() if values.shape[1]]
+    fixed_weights = {role: (1.0 / len(active) if role in active else 0.0)
+                     for role in ("continuous", "ordinal", "nominal")}
+    if weights is not None:
+        if set(weights) != set(fixed_weights) or any(
+                not np.isclose(weights[key], fixed_weights[key]) for key in fixed_weights):
+            raise ValueError("MMD v2 uses fixed equal weights across active roles; overrides are not allowed.")
+    weights = fixed_weights
+    fit_kernel = _mixed_kernel(fit_values, fit_values, 1.0, weights)
+    fit_distances = -2.0 * np.log(np.maximum(fit_kernel[np.triu_indices(len(fit_kernel), 1)], 1e-300))
+    positive = fit_distances[fit_distances > 0]
+    bandwidth = float(np.sqrt(np.median(positive))) if positive.size else 1.0
+    bandwidth = max(bandwidth, np.finfo(float).eps)
+    reference_values = fit_values if fit_role == "final" else train_values
+    kxx = _mixed_kernel(reference_values, reference_values, bandwidth, weights)
+    kyy = _mixed_kernel(candidate_values, candidate_values, bandwidth, weights)
+    kxy = _mixed_kernel(reference_values, candidate_values, bandwidth, weights)
+    raw_biased = float(kxx.mean() + kyy.mean() - 2.0 * kxy.mean())
+    biased = max(raw_biased, 0.0)
+    reference_size = len(reference_values["continuous"])
+    if reference_size < 2 or len(candidate) < 2:
+        unbiased = float("nan")
+    else:
+        unbiased = float((kxx.sum() - np.trace(kxx)) / (reference_size * (reference_size - 1))
+                         + (kyy.sum() - np.trace(kyy)) / (len(candidate) * (len(candidate) - 1))
+                         - 2.0 * kxy.mean())
+    return {
+        "version": "mixed_rbf_mmd_v2",
+        "b_mmd": biased,
+        "b_mmd_raw": raw_biased,
+        "b_mmd_clip": max(biased, 0.0),
+        "u_mmd": unbiased,
+        "u_mmd_clip": max(unbiased, 0.0) if np.isfinite(unbiased) else np.nan,
+        "score": max(0.0, 1.0 - np.sqrt(max(biased, 0.0))),
+        "bandwidth": bandwidth,
+        "weights": weights,
+        "fit_role": "train+tuning" if tuning is not None else "train",
+        "preprocessing": preprocessor.metadata(),
+    }
 
 def _linear_kernel(A, B):
     """ Linear kernel, K(x, y) = x^T y """
@@ -56,6 +140,12 @@ class MaximumMeanDiscrepancy(MetricClass):
                  gamma: float = None,
                  degree: int = 3,
                  coef0: float = 1,
+                 version: str = 'legacy',
+                 tuning_data=None,
+                 ordinal_cols=None,
+                 ordinal_orders=None,
+                 fit_role='candidate',
+                 weights=None,
                  ) -> dict:
         """ Function for calculating Maximum Mean Discrepancy (MMD) between the real and synthetic datasets.
         Calculates both the biased (V statistic) and unbiased (U statistic) estimates of MMD^2. 
@@ -79,6 +169,22 @@ class MaximumMeanDiscrepancy(MetricClass):
             >>> MMD.evaluate(use_cats=False, kernel='linear') # doctest: +ELLIPSIS
             {'kernel': 'linear', 'u_mmd': ..., 'u_mmd_clip': 0.0, 'b_mmd': 0.0, 'b_mmd_clip': 0.0}
         """
+        if version == 'mixed_rbf_mmd_v2':
+            result = mixed_rbf_mmd_v2(
+                self.real_data,
+                self.synt_data,
+                continuous_columns=self.num_cols or [],
+                ordinal_columns=ordinal_cols or [],
+                nominal_columns=self.cat_cols or [],
+                tuning=tuning_data,
+                ordinal_orders=ordinal_orders,
+                fit_role=fit_role,
+                weights=weights,
+            )
+            self.results.update(result)
+            return self.results
+        if version != 'legacy':
+            raise ValueError("version must be 'legacy' or 'mixed_rbf_mmd_v2'.")
         try:
             assert use_cats and len(self.cat_cols) > 0 or not use_cats, "Categorical columns must be specified if use_cats is True."
             assert len(self.num_cols) > 0 or use_cats, "Numerical columns must be specified if use_cats is False."
@@ -136,6 +242,10 @@ class MaximumMeanDiscrepancy(MetricClass):
         Example:
             [('utility', 'Metric description', 0.1234, 0.0123)]
         """
+        if self.results.get('version') == 'mixed_rbf_mmd_v2':
+            return [('utility', 'Mixed-schema RBF MMD^2 (biased)', self.results['b_mmd_clip'], None),
+                    ('utility', ' -> MMD v2 score', self.results['score'], None),
+                    ('utility', ' -> Unbiased audit estimate', self.results['u_mmd_clip'], None)]
         match self.results.get('kernel', None):
             case 'linear':
                 kernel_desc = 'linear'
@@ -159,6 +269,9 @@ class MaximumMeanDiscrepancy(MetricClass):
             name1  u  0.0  0.0    0.0    0.0
             name2  p  0.0  0.0    0.0    0.0
         """
+        if self.results.get('version') == 'mixed_rbf_mmd_v2':
+            return [{'metric': 'mixed_rbf_mmd_v2', 'dim': 'u',
+                     'val': self.results['b_mmd_clip'], 'n_val': self.results['score']}]
         if self.results != {}:
             return [{'metric': 'b_mmd', 'dim': 'u', 'val': self.results['b_mmd_clip'], 'n_val': max(0, 1-self.results['b_mmd_clip']**0.5)},
                     {'metric': 'u_mmd', 'dim': 'u', 'val': self.results['u_mmd_clip'], 'n_val': max(0, 1-self.results['u_mmd_clip']**0.5)}]

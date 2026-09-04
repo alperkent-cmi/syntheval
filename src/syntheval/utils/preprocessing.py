@@ -11,6 +11,97 @@ import pandas as pd
 from sklearn.preprocessing import OrdinalEncoder, MinMaxScaler
 
 
+class MixedSchemaPreprocessor:
+    """Train-fitted state for role-aware mixed-schema distances.
+
+    Nominal values are deliberately not encoded: equality is evaluated on the
+    original values.  Ordinal values are ranked using train vocabulary, while
+    continuous values are min-max scaled using train extrema.
+    """
+
+    def __init__(self, train_frame, continuous_columns=None, ordinal_columns=None,
+                 nominal_columns=None, ordinal_orders=None) -> None:
+        self.continuous_columns = list(continuous_columns or [])
+        self.ordinal_columns = list(ordinal_columns or [])
+        self.nominal_columns = list(nominal_columns or [])
+        self.ordinal_orders = ordinal_orders or {}
+        columns = self.continuous_columns + self.ordinal_columns + self.nominal_columns
+        if not columns:
+            raise ValueError("At least one schema column must be provided.")
+        missing = [column for column in columns if column not in train_frame.columns]
+        if missing:
+            raise KeyError(f"Training frame is missing schema columns: {missing}")
+        if train_frame.empty:
+            raise ValueError("Training population must not be empty.")
+        if self.continuous_columns:
+            numeric = train_frame[self.continuous_columns]
+            if not np.isfinite(numeric.to_numpy(dtype=float)).all():
+                raise ValueError("Continuous training values must be finite and non-missing.")
+        self.minimums = train_frame[self.continuous_columns].min() if self.continuous_columns else pd.Series(dtype=float)
+        self.maximums = train_frame[self.continuous_columns].max() if self.continuous_columns else pd.Series(dtype=float)
+        self.ranks = {}
+        for column in self.ordinal_columns:
+            if train_frame[column].isna().any():
+                raise ValueError(f"Ordinal column {column!r} contains null training values.")
+            values = list(self.ordinal_orders.get(column, pd.unique(train_frame[column])))
+            if not values:
+                raise ValueError(f"Ordinal column {column!r} has no train values.")
+            missing = set(train_frame[column]) - set(values)
+            if missing:
+                raise ValueError(f"Ordinal column {column!r} has values absent from ordinal_orders: {missing}")
+            self.ranks[column] = {value: index / max(len(values) - 1, 1) for index, value in enumerate(values)}
+        self.fit_role = "train"
+
+    @classmethod
+    def fit(cls, train_frame, continuous_columns=None, ordinal_columns=None,
+            nominal_columns=None, ordinal_orders=None):
+        """Fit mixed-schema transforms using only ``train_frame``."""
+        return cls(train_frame, continuous_columns, ordinal_columns, nominal_columns, ordinal_orders)
+
+    def transform(self, frame, role="evaluation"):
+        """Return role-separated values without changing fitted state."""
+        missing = [column for column in self.columns if column not in frame.columns]
+        if missing:
+            raise KeyError(f"Frame role={role!r} is missing schema columns: {missing}")
+        if frame.empty:
+            raise ValueError(f"Population role={role!r} must not be empty.")
+        if self.continuous_columns and not np.isfinite(frame[self.continuous_columns].to_numpy(dtype=float)).all():
+            raise ValueError(f"Continuous values for role={role!r} must be finite and non-missing.")
+        result = {
+            "continuous": frame[self.continuous_columns].to_numpy(dtype=float) if self.continuous_columns else np.empty((len(frame), 0)),
+            "ordinal": np.empty((len(frame), len(self.ordinal_columns)), dtype=float),
+            "nominal": frame[self.nominal_columns].to_numpy(dtype=object) if self.nominal_columns else np.empty((len(frame), 0), dtype=object),
+        }
+        for index, column in enumerate(self.ordinal_columns):
+            if frame[column].isna().any():
+                raise ValueError(f"Ordinal column {column!r} contains null values for role={role!r}.")
+            unknown = set(frame[column]) - set(self.ranks[column])
+            if unknown:
+                raise ValueError(f"Ordinal column {column!r} contains unseen values for role={role!r}: {unknown}")
+            result["ordinal"][:, index] = frame[column].map(self.ranks[column]).to_numpy(dtype=float)
+        if self.continuous_columns:
+            minimum = self.minimums.to_numpy(dtype=float)
+            scale = (self.maximums - self.minimums).replace(0, 1).to_numpy(dtype=float)
+            result["continuous"] = (result["continuous"] - minimum) / scale
+        return result
+
+    @property
+    def columns(self):
+        return self.continuous_columns + self.ordinal_columns + self.nominal_columns
+
+    def metadata(self):
+        """Return fit-role and train-only state for audit output."""
+        return {
+            "fit_role": self.fit_role,
+            "continuous_columns": list(self.continuous_columns),
+            "ordinal_columns": list(self.ordinal_columns),
+            "nominal_columns": list(self.nominal_columns),
+            "continuous_minimums": self.minimums.tolist(),
+            "continuous_maximums": self.maximums.tolist(),
+            "ordinal_ranks": {column: {repr(key): value for key, value in ranks.items()} for column, ranks in self.ranks.items()},
+        }
+
+
 class TrainFittedPreprocessor:
     """Encode evaluation frames using state fitted on one real train frame."""
 
