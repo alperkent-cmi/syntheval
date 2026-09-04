@@ -3,6 +3,7 @@
 # Date: 21-08-2023
 
 import numpy as np
+import pandas as pd
 
 from syntheval.metrics.core.metric import MetricClass
 
@@ -16,6 +17,18 @@ from syntheval.utils.plot_metrics import plot_significantly_dissimilar_variables
 # inputs sequential. Matches the threshold used for corr_diff/mi_diff, which
 # have the same "independent per-column work" shape.
 _PARALLEL_MIN_COLS = 50
+
+
+def _is_missing_scalar(value):
+    missing = pd.isna(value)
+    return bool(missing) if np.isscalar(missing) else False
+
+
+def _canonical_values(values):
+    return np.asarray([
+        '__syntheval_missing__' if _is_missing_scalar(value) else value
+        for value in list(values)
+    ], dtype=object)
 
 def _total_variation_distance(x,y):
     """Function for calculating the TVD (KS statistic equivalent)
@@ -31,12 +44,20 @@ def _total_variation_distance(x,y):
         >>> _total_variation_distance([1,2,3,4,5],[1,2,3,4,5])
         0.0
     """
-    X, Y = Counter(x), Counter(y)
+    x_values = _canonical_values(x)
+    y_values = _canonical_values(y)
+    if len(x_values) == 0 or len(y_values) == 0:
+        raise ValueError('TVD requires non-empty samples.')
+    X, Y = Counter(x_values), Counter(y_values)
     merged = X + Y
 
-    return float(np.round(0.5*sum([abs(X[key]/len(x)-Y[key]/len(y)) for key in merged.keys()]),4))
+    return float(0.5 * sum(
+        abs(X[key] / len(x_values) - Y[key] / len(y_values))
+        for key in merged.keys()
+    ))
 
-def _discrete_ks(x, y, n_perms=1000):
+
+def _discrete_ks(x, y, n_perms=1000, random_state=42):
     """Function for doing permutation test of discrete values in the KS test
     
     Args:
@@ -52,11 +73,27 @@ def _discrete_ks(x, y, n_perms=1000):
         >>> _discrete_ks([1,2,3,4,5],[1,2,3,4,5])
         (0.0, 1.0)
     """
-    res = permutation_test((x, y), _total_variation_distance, n_resamples=n_perms, vectorized=False, permutation_type='independent', alternative='greater')
+    x_values = _canonical_values(x)
+    y_values = _canonical_values(y)
+    if len(x_values) == 0 or len(y_values) == 0:
+        raise ValueError('Discrete KS requires non-empty samples.')
+    codes = pd.factorize(np.concatenate([x_values, y_values]), sort=False)[0]
+    x_codes = codes[:len(x_values)]
+    y_codes = codes[len(x_values):]
+    res = permutation_test(
+        (x_codes, y_codes),
+        _total_variation_distance,
+        n_resamples=n_perms,
+        vectorized=False,
+        permutation_type='independent',
+        alternative='greater',
+        rng=np.random.default_rng(random_state),
+    )
 
     return float(res.statistic), float(res.pvalue)
 
-def _evaluate_one_column(category, R, F, is_categorical, n_perms):
+
+def _evaluate_one_column(category, R, F, is_categorical, n_perms, random_state):
     """Run the (discrete or continuous) KS test for a single column.
 
     Standalone module-level function (rather than a method/closure) so it
@@ -64,14 +101,26 @@ def _evaluate_one_column(category, R, F, is_categorical, n_perms):
     to pickle the whole metric instance -- only the two column Series are
     sent to the worker.
 
-    Returns (category, is_categorical, statistic, pvalue).
+    Returns (category, is_categorical, statistic, pvalue, valid, test_name).
     """
     if is_categorical:
-        statistic, pvalue = _discrete_ks(F, R, n_perms)
+        real_values = _canonical_values(R)
+        synt_values = _canonical_values(F)
+        if len(real_values) == 0 or len(synt_values) == 0:
+            return category, is_categorical, np.nan, np.nan, False, 'tvd_permutation'
+        statistic, pvalue = _discrete_ks(
+            synt_values, real_values, n_perms, random_state=random_state
+        )
+        test_name = 'tvd_permutation'
     else:
-        KstestResult = ks_2samp(R, F)
+        real_values = pd.to_numeric(pd.Series(R), errors='coerce').dropna().to_numpy()
+        synt_values = pd.to_numeric(pd.Series(F), errors='coerce').dropna().to_numpy()
+        if len(real_values) == 0 or len(synt_values) == 0:
+            return category, is_categorical, np.nan, np.nan, False, 'ks_2samp'
+        KstestResult = ks_2samp(real_values, synt_values, nan_policy='omit')
         statistic, pvalue = KstestResult.statistic, KstestResult.pvalue
-    return category, is_categorical, statistic, pvalue
+        test_name = 'ks_2samp'
+    return category, is_categorical, float(statistic), float(pvalue), True, test_name
 
 class KolmogorovSmirnovTest(MetricClass):
     """The Metric Class is an abstract class that interfaces with 
@@ -96,7 +145,7 @@ class KolmogorovSmirnovTest(MetricClass):
         """ Set to 'privacy' or 'utility' """
         return 'utility'
 
-    def evaluate(self, sig_lvl=0.05, n_perms = 1000) -> float | dict:
+    def evaluate(self, sig_lvl=0.05, n_perms = 1000, random_state=42) -> float | dict:
         """Function for executing the Kolmogorov-Smirnov test.
 
         Args:
@@ -114,17 +163,32 @@ class KolmogorovSmirnovTest(MetricClass):
             >>> KST.evaluate(sig_lvl=0.05, n_perms=10) # doctest: +ELLIPSIS
             {'avg stat': 0.0, ...}
         """
+        if not 0.0 <= sig_lvl <= 1.0:
+            raise ValueError('SynthEval(ks_test): sig_lvl must be between 0 and 1.')
+        if not isinstance(n_perms, (int, np.integer)) or n_perms < 1:
+            raise ValueError('SynthEval(ks_test): n_perms must be a positive integer.')
+        if not isinstance(random_state, (int, np.integer)):
+            raise ValueError('SynthEval(ks_test): random_state must be an integer.')
         n_dists, c_dists = [], []
+        legacy_c_dists = []
         pvals = []
         sig_cols = []
+        column_results = []
         
         self.sig_lvl = sig_lvl
 
         columns = list(self.real_data.columns)
         cat_col_set = set(self.cat_cols)
         tasks = [
-            (category, self.real_data[category], self.synt_data[category], category in cat_col_set, n_perms)
-            for category in columns
+            (
+                category,
+                self.real_data[category],
+                self.synt_data[category],
+                category in cat_col_set,
+                n_perms,
+                int(random_state) + index,
+            )
+            for index, category in enumerate(columns)
         ]
 
         if len(columns) >= _PARALLEL_MIN_COLS:
@@ -133,9 +197,20 @@ class KolmogorovSmirnovTest(MetricClass):
         else:
             results = [_evaluate_one_column(*task) for task in tasks]
 
-        for category, is_categorical, statistic, pvalue in results:
+        for category, is_categorical, statistic, pvalue, valid, test_name in results:
+            column_results.append({
+                'column': category,
+                'test': test_name,
+                'is_categorical': is_categorical,
+                'statistic': statistic,
+                'pvalue': pvalue,
+                'valid': valid,
+            })
+            if not valid:
+                continue
             if is_categorical:
                 c_dists.append(statistic)
+                legacy_c_dists.append(float(np.round(statistic, 4)))
             else:
                 n_dists.append(statistic)
             pvals.append(pvalue)
@@ -154,16 +229,38 @@ class KolmogorovSmirnovTest(MetricClass):
         avg_ks, err_ks = _mean_and_se(n_dists)
         avg_tvd, err_tvd = _mean_and_se(c_dists)
         avg_stat, err_stat = _mean_and_se(n_dists + c_dists)
+        legacy_avg_tvd, legacy_err_tvd = _mean_and_se(legacy_c_dists)
+        legacy_avg_stat, legacy_err_stat = _mean_and_se(n_dists + legacy_c_dists)
         avg_pval, err_pval = _mean_and_se(pvals)
+        valid_columns = [row['column'] for row in column_results if row['valid']]
+        invalid_columns = [row['column'] for row in column_results if not row['valid']]
+        frac_sigs = float(len(sig_cols) / len(pvals)) if pvals else np.nan
 
         ### Calculate number of significant tests, and fraction of significant tests
-        self.results = {'avg stat' : float(avg_stat), 'stat err' : float(err_stat),
-                        'avg ks'   : float(avg_ks), 'ks err'   : float(err_ks),
-                        'avg tvd'  : float(avg_tvd), 'tvd err'  : float(err_tvd),
+        self.results = {'avg stat' : float(legacy_avg_stat), 'stat err' : float(legacy_err_stat),
+                'avg ks'   : float(avg_ks), 'ks err'   : float(err_ks),
+                'avg tvd'  : float(legacy_avg_tvd), 'tvd err'  : float(legacy_err_tvd),
                         'avg pval' : float(avg_pval), 'pval err' : float(err_pval),
                         'num sigs' : len(sig_cols),
-                        'frac sigs': float(len(sig_cols)/len(pvals)),
-                        'sigs cols': sig_cols
+                        'frac sigs': frac_sigs,
+                        'sigs cols': sig_cols,
+                        'avg stat_v2': float(avg_stat),
+                        'stat err_v2': float(err_stat),
+                        'avg ks_v2': float(avg_ks),
+                        'ks err_v2': float(err_ks),
+                        'avg tvd_v2': float(avg_tvd),
+                        'tvd err_v2': float(err_tvd),
+                        'avg pval_v2': float(avg_pval),
+                        'pval err_v2': float(err_pval),
+                        'num sigs_v2': len(sig_cols),
+                        'frac sigs_v2': frac_sigs,
+                        'ks_valid_columns_v2': tuple(valid_columns),
+                        'ks_invalid_columns_v2': tuple(invalid_columns),
+                        'ks_valid_tests_v2': len(valid_columns),
+                        'ks_invalid_tests_v2': len(invalid_columns),
+                        'ks_column_results_v2': column_results,
+                        'ks_n_perms_v2': int(n_perms),
+                        'ks_seed_v2': int(random_state),
                         }
 
         if (self.plot_figures and sig_cols != []): plot_significantly_dissimilar_variables(self.real_data, self.synt_data, sig_cols, self.cat_cols)
@@ -177,7 +274,7 @@ class KolmogorovSmirnovTest(MetricClass):
             ("utility", "  -> Avg. Total Variation Distance", self.results['avg tvd'], self.results['tvd err']),
             ("utility", "Fraction of Significant KS Tests", self.results['frac sigs'], None),
             ("utility", f"  -> # of Significant Tests at a={self.sig_lvl:.2f}", self.results['num sigs'], None),
-            ("utility", f"  -> Avg. combined p-value", self.results['avg pval'], self.results['pval err']),
+            ("utility", "  -> Avg. combined p-value", self.results['avg pval'], self.results['pval err']),
         ]
         return rows
     
@@ -226,3 +323,48 @@ class KolmogorovSmirnovTest(MetricClass):
                      'n_val': 1-R['frac sigs'], 
                      }]
         else: pass
+
+    def normalize_output_v2(self) -> list:
+        """Return full-precision KS/TVD identities with valid-test metadata."""
+        if self.results == {}:
+            return []
+        R = self.results
+        stat = R['avg stat_v2']
+        frac = R['frac sigs_v2']
+        return [
+            {
+                'metric': 'ks_tvd_stat_v2',
+                'dim': 'u',
+                'val': stat,
+                'err': R['stat err_v2'],
+                'n_val': float(np.clip(1.0 - stat, 0.0, 1.0)) if np.isfinite(stat) else np.nan,
+                'n_err': R['stat err_v2'],
+                'metric_version': 'v2',
+                'raw_value': stat,
+                'normalized_value': float(np.clip(1.0 - stat, 0.0, 1.0)) if np.isfinite(stat) else np.nan,
+                'metadata': {
+                    'valid_tests': R['ks_valid_tests_v2'],
+                    'invalid_tests': R['ks_invalid_tests_v2'],
+                    'valid_columns': list(R['ks_valid_columns_v2']),
+                    'invalid_columns': list(R['ks_invalid_columns_v2']),
+                    'n_perms': R['ks_n_perms_v2'],
+                    'seed': R['ks_seed_v2'],
+                },
+            },
+            {
+                'metric': 'frac_ks_sigs_v2',
+                'dim': 'u',
+                'val': frac,
+                'err': None,
+                'n_val': float(np.clip(1.0 - frac, 0.0, 1.0)) if np.isfinite(frac) else np.nan,
+                'n_err': None,
+                'metric_version': 'v2',
+                'raw_value': frac,
+                'normalized_value': float(np.clip(1.0 - frac, 0.0, 1.0)) if np.isfinite(frac) else np.nan,
+                'metadata': {
+                    'valid_tests': R['ks_valid_tests_v2'],
+                    'invalid_tests': R['ks_invalid_tests_v2'],
+                    'seed': R['ks_seed_v2'],
+                },
+            },
+        ]

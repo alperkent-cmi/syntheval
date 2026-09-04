@@ -98,11 +98,22 @@ def _gower_matrix_sklearn(data_x, data_y=None, cat_features: list = None, weight
 
 
 
-def _knn_distance(a, b, cat_cols, num, metric: Literal['gower', 'euclid', 'EXPERIMENTAL_gower'] = 'gower', weights=None):
+def _knn_distance(
+    a,
+    b,
+    cat_cols,
+    num,
+    metric: Literal['gower', 'euclid', 'EXPERIMENTAL_gower'] = 'gower',
+    weights=None,
+    same_dataset=None,
+):
+    if same_dataset is None:
+        same_dataset = a is b
+
     def gower_knn(a, b, bool_cat_cols, gower_variant):
             """Function used for finding nearest neighbours"""
             d = []
-            if np.array_equal(a,b):
+            if same_dataset:
                 matrix = _gower_matrix_sklearn(a, cat_features=bool_cat_cols, weights=weights, nums_metric=gower_variant)+np.eye(len(a))
                 for _ in range(num):
                     d.append(matrix.min(axis=1))
@@ -118,7 +129,7 @@ def _knn_distance(a, b, cat_cols, num, metric: Literal['gower', 'euclid', 'EXPER
             """Function used for finding nearest neighbours"""
             d = []
             nn = NearestNeighbors(n_neighbors=num+1, metric_params={'w':weights}) #TODO: add num_att_range here as well
-            if np.array_equal(a,b):
+            if same_dataset:
                 nn.fit(a)
                 dists, _ = nn.kneighbors(a)
                 for i in range(num):

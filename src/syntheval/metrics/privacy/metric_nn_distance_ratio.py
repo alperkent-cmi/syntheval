@@ -8,6 +8,14 @@ from syntheval.metrics.core.metric import MetricClass
 
 from syntheval.utils.nn_distance import _knn_distance
 
+
+def _standard_error(values):
+    values = np.asarray(values, dtype=float)
+    if values.size < 2:
+        return 0.0
+    return float(np.std(values, ddof=1) / np.sqrt(values.size))
+
+
 class NearestNeighbourDistanceRatio(MetricClass):
     """The Metric Class is an abstract class that interfaces with 
     SynthEval. When initialised the class has the following attributes:
@@ -49,13 +57,13 @@ class NearestNeighbourDistanceRatio(MetricClass):
         dist = _knn_distance(self.real_data, self.synt_data, self.cat_cols, 2, self.nn_dist)
         dr = list(map(lambda x: x[0] / (x[1]+1e-16), np.transpose(dist)))
 
-        self.results = {'avg': float(np.mean(dr)), 'err': float(np.std(dr,ddof=1)/np.sqrt(len(dr)))}
+        self.results = {'avg': float(np.mean(dr)), 'err': _standard_error(dr)}
 
         if self.hout_data is not None:
             dist_h = _knn_distance(self.hout_data, self.synt_data, self.cat_cols, 2, self.nn_dist)
             dr_h = list(map(lambda x: x[0] / (x[1]+1e-16), np.transpose(dist_h)))
             diff     = np.mean(dr_h) - self.results['avg']
-            err_diff = np.sqrt((np.std(dr_h,ddof=1)/np.sqrt(len(dr_h)))**2+self.results['err']**2)
+            err_diff = np.sqrt(_standard_error(dr_h) ** 2 + self.results['err'] ** 2)
 
             self.results['priv_loss'] = float(diff)
             self.results['priv_loss_err'] = float(err_diff)
@@ -96,7 +104,7 @@ class NearestNeighbourDistanceRatio(MetricClass):
                      'val': self.results['priv_loss'], 
                      'err': self.results['priv_loss_err'], 
                      'n_val': 1-abs(self.results['priv_loss']), 
-                     'n_err': self.results['err'], 
+                     'n_err': self.results['priv_loss_err'],
                      }])
             return output
         else: pass

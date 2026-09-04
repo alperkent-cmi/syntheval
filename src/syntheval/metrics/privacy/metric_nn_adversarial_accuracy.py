@@ -13,6 +13,14 @@ from syntheval.utils.nn_distance import _knn_distance
 # doctest-sized inputs (e.g. n_resample=1) sequential.
 _PARALLEL_MIN_RESAMPLES = 5
 
+
+def _standard_error(values):
+    values = np.asarray(values, dtype=float)
+    if values.size < 2:
+        return 0.0
+    return float(np.std(values, ddof=1) / np.sqrt(values.size))
+
+
 def _adversarial_score(real, fake, cat_cols, metric):
     """Function for calculating adversarial score
     
@@ -32,22 +40,30 @@ def _adversarial_score(real, fake, cat_cols, metric):
         >>> _adversarial_score(real, fake, [], 'euclid')
         0.0
     """
-    left = np.mean(_knn_distance(real, fake, cat_cols, 1, metric)[0] > _knn_distance(real, real, cat_cols, 1, metric)[0])
-    right = np.mean(_knn_distance(fake, real, cat_cols, 1, metric)[0] > _knn_distance(fake, fake, cat_cols, 1, metric)[0])
+    left = np.mean(
+        _knn_distance(real, fake, cat_cols, 1, metric, same_dataset=False)[0]
+        > _knn_distance(real, real, cat_cols, 1, metric, same_dataset=True)[0]
+    )
+    right = np.mean(
+        _knn_distance(fake, real, cat_cols, 1, metric, same_dataset=False)[0]
+        > _knn_distance(fake, fake, cat_cols, 1, metric, same_dataset=True)[0]
+    )
     return float(0.5 * (left + right))
 
-def _one_resample_round(real, fake, cat_cols, metric, sample_real, sample_fake):
+
+def _one_resample_round(real, fake, cat_cols, metric, sample_real, sample_fake, seed):
     """Run one resample-and-score round. Standalone module-level function
     (rather than inlined in the loop) so it can be dispatched via joblib's
     'loky' (process) backend -- each round is an independent random
     subsample + adversarial-score computation, so the whole resample loop
     is embarrassingly parallel.
     """
-    temp_r = real.sample(n=len(fake)) if sample_real else real
-    temp_f = fake.sample(n=len(real)) if sample_fake else fake
+    temp_r = real.sample(n=len(fake), random_state=seed) if sample_real else real
+    temp_f = fake.sample(n=len(real), random_state=seed) if sample_fake else fake
     return _adversarial_score(temp_r, temp_f, cat_cols, metric)
 
-def evaluate_dataset_nnaa(real, fake, num_cols, cat_cols, metric, n_resample):
+
+def evaluate_dataset_nnaa(real, fake, num_cols, cat_cols, metric, n_resample, seed=0):
     """Helper function for running adversarial score multiple times if the 
     datasets have much different sizes.
     
@@ -70,6 +86,11 @@ def evaluate_dataset_nnaa(real, fake, num_cols, cat_cols, metric, n_resample):
         (0.0, 0.0)
     """
 
+    if n_resample < 1:
+        raise ValueError("NNAA requires at least one resample round")
+    if len(real) == 0 or len(fake) == 0:
+        raise ValueError("NNAA requires non-empty real and synthetic datasets")
+
     real_fake = len(real)/len(fake)
     fake_real = len(fake)/len(real)
 
@@ -78,17 +99,33 @@ def evaluate_dataset_nnaa(real, fake, num_cols, cat_cols, metric, n_resample):
         if n_resample >= _PARALLEL_MIN_RESAMPLES:
             from joblib import Parallel, delayed
             aa_lst = Parallel(n_jobs=-2, backend='loky')(
-                delayed(_one_resample_round)(real, fake, cat_cols, metric, sample_real, sample_fake)
-                for _ in range(n_resample)
+                delayed(_one_resample_round)(
+                    real,
+                    fake,
+                    cat_cols,
+                    metric,
+                    sample_real,
+                    sample_fake,
+                    seed + round_number,
+                )
+                for round_number in range(n_resample)
             )
         else:
             aa_lst = [
-                _one_resample_round(real, fake, cat_cols, metric, sample_real, sample_fake)
-                for _ in range(n_resample)
+                _one_resample_round(
+                    real,
+                    fake,
+                    cat_cols,
+                    metric,
+                    sample_real,
+                    sample_fake,
+                    seed + round_number,
+                )
+                for round_number in range(n_resample)
             ]
 
         avg = np.mean(aa_lst)
-        err = np.std(aa_lst, ddof=1)/np.sqrt(len(aa_lst))
+        err = _standard_error(aa_lst)
     else:
         avg = _adversarial_score(real, fake, cat_cols, metric)
         err = 0.0
@@ -116,9 +153,9 @@ class NearestNeighbourAdversarialAccuracy(MetricClass):
 
     def type() -> str:
         """ Set to 'privacy' or 'utility' """
-        return 'utility'
+        return 'privacy'
 
-    def evaluate(self, n_resample=30) -> dict:
+    def evaluate(self, n_resample=30, seed=0) -> dict:
         """Implementation heavily inspired by original paper
         
         Args:
@@ -136,12 +173,28 @@ class NearestNeighbourAdversarialAccuracy(MetricClass):
             {'avg': 0.0, 'err': 0.0}
         """
 
-        avg, err = evaluate_dataset_nnaa(self.real_data,self.synt_data,self.num_cols,self.cat_cols,self.nn_dist,n_resample)
+        avg, err = evaluate_dataset_nnaa(
+            self.real_data,
+            self.synt_data,
+            self.num_cols,
+            self.cat_cols,
+            self.nn_dist,
+            n_resample,
+            seed=seed,
+        )
 
         self.results = {'avg': float(avg), 'err': float(err)}
 
         if self.hout_data is not None:
-            avg_h, err_h = evaluate_dataset_nnaa(self.hout_data,self.synt_data,self.num_cols,self.cat_cols,self.nn_dist,n_resample)
+            avg_h, err_h = evaluate_dataset_nnaa(
+                self.hout_data,
+                self.synt_data,
+                self.num_cols,
+                self.cat_cols,
+                self.nn_dist,
+                n_resample,
+                seed=seed + n_resample,
+            )
             diff = avg_h - avg
             err_diff = np.sqrt(err_h**2+err**2)
 
@@ -153,7 +206,7 @@ class NearestNeighbourAdversarialAccuracy(MetricClass):
     def format_output(self) -> list:
         """ Return a list of tuples for printing results to the rich console."""
         rows = []
-        rows.append(("utility",
+        rows.append(("privacy",
                     "Nearest neighbour adversarial accuracy", 
                     self.results['avg'], 
                     self.results['err']))
@@ -174,7 +227,7 @@ class NearestNeighbourAdversarialAccuracy(MetricClass):
             name2  p  0.0  0.0    0.0    0.0 
         """
         if self.results != {}:
-            output =  [{'metric': 'nnaa', 'dim': 'u', 
+            output =  [{'metric': 'nnaa', 'dim': 'p',
                         'val': self.results['avg'], 
                         'err': self.results['err'], 
                         'n_val': 1-self.results['avg'], 

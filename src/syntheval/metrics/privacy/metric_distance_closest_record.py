@@ -46,8 +46,22 @@ class MedianDistanceToClosestRecord(MetricClass):
             {'mDCR': 1.0}
         """
         
-        distances = _knn_distance(self.synt_data,self.real_data,self.cat_cols,1,self.nn_dist)
-        in_dists = _knn_distance(self.real_data,self.real_data,self.cat_cols,1,self.nn_dist)
+        distances = _knn_distance(
+            self.synt_data,
+            self.real_data,
+            self.cat_cols,
+            1,
+            self.nn_dist,
+            same_dataset=False,
+        )
+        in_dists = _knn_distance(
+            self.real_data,
+            self.real_data,
+            self.cat_cols,
+            1,
+            self.nn_dist,
+            same_dataset=True,
+        )
 
         int_nn = np.median(in_dists)
         mut_nn = np.median(distances)

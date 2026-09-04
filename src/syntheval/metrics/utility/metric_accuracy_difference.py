@@ -3,13 +3,13 @@
 # Date: 05-03-2023
 
 import copy
+from numbers import Integral
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from sklearn.utils import resample
-from sklearn.metrics import f1_score
+from sklearn.metrics import balanced_accuracy_score, f1_score
 from sklearn.model_selection import StratifiedKFold
 
 from sklearn.ensemble import AdaBoostClassifier, RandomForestClassifier
@@ -65,7 +65,68 @@ def _series_sem(values: pd.Series) -> float:
         return np.nan
     return float(np.nanstd(arr, ddof=1) / np.sqrt(arr.size))
 
-def class_test(real_models, fake_models, real, fake, test, F1_type):
+
+def _classification_score(y_true, y_pred, score_type, labels=None):
+    if score_type == 'balanced_accuracy':
+        return float(balanced_accuracy_score(y_true, y_pred))
+    return float(f1_score(
+        y_true,
+        y_pred,
+        average=score_type,
+        labels=labels,
+        zero_division=0,
+    ))
+
+
+def _v2_score_type(score_type):
+    if score_type == 'balanced_accuracy':
+        return 'balanced_accuracy'
+    return 'macro'
+
+
+def _class_support(values):
+    series = pd.Series(values)
+    if series.isna().any():
+        raise ValueError("SynthEval(cls_acc): target values cannot contain missing labels.")
+    counts = series.value_counts(dropna=False)
+    return tuple(counts.index.tolist()), counts.to_dict()
+
+
+def _validate_target_support(target_var, real_y, fake_y, hout_y, k_folds):
+    real_classes, real_counts = _class_support(real_y)
+    fake_classes, fake_counts = _class_support(fake_y)
+    if len(real_classes) < 2:
+        raise ValueError(
+            f"SynthEval(cls_acc): target {target_var!r} needs at least two real classes; "
+            f"observed {real_classes!r}."
+        )
+    if set(fake_classes) != set(real_classes):
+        raise ValueError(
+            f"SynthEval(cls_acc): target {target_var!r} synthetic classes {fake_classes!r} "
+            f"do not match real classes {real_classes!r}."
+        )
+    for role, counts in (("real", real_counts), ("synthetic", fake_counts)):
+        insufficient = {
+            label: int(count)
+            for label, count in counts.items()
+            if count < k_folds
+        }
+        if insufficient:
+            raise ValueError(
+                f"SynthEval(cls_acc): target {target_var!r} has insufficient {role} class "
+                f"support for {k_folds} folds: {insufficient!r}."
+            )
+    if hout_y is not None:
+        holdout_classes, _ = _class_support(hout_y)
+        if set(holdout_classes) != set(real_classes):
+            raise ValueError(
+                f"SynthEval(cls_acc): target {target_var!r} holdout classes "
+                f"{holdout_classes!r} do not match real classes {real_classes!r}."
+            )
+    return tuple(real_classes)
+
+
+def class_test(real_models, fake_models, real, fake, test, F1_type, labels=None):
     """Function for running a training session and getting predictions 
     on the SciPy model provided, and data.
     
@@ -101,8 +162,8 @@ def class_test(real_models, fake_models, real, fake, test, F1_type):
         pred_real = r_mod.predict(test[0])
         pred_fake = f_mod.predict(test[0])
 
-        f1_real = f1_score(test[1],pred_real,average=F1_type)
-        f1_fake = f1_score(test[1],pred_fake,average=F1_type)
+        f1_real = _classification_score(test[1], pred_real, F1_type, labels=labels)
+        f1_fake = _classification_score(test[1], pred_fake, F1_type, labels=labels)
 
         res.append([f1_real, f1_fake])
     return np.array(res).T
@@ -110,7 +171,7 @@ def class_test(real_models, fake_models, real, fake, test, F1_type):
 def _evaluate_one_fold(
     train_index_real, test_index_real, train_index_fake,
     real_x_sub, real_y_sub, fake_x_sub, fake_y_sub,
-    real_models, fake_models, F1_type,
+    real_models, fake_models, F1_type, v2_score_type, labels,
 ):
     """Run class_test for a single CV fold. Standalone module-level function
     (rather than inlined in the loop) so it can be dispatched via joblib's
@@ -120,14 +181,25 @@ def _evaluate_one_fold(
     real_x_train, real_y_train = real_x_sub.iloc[train_index_real], real_y_sub.iloc[train_index_real]
     real_x_test, real_y_test = real_x_sub.iloc[test_index_real], real_y_sub.iloc[test_index_real]
     fake_x_train, fake_y_train = fake_x_sub.iloc[train_index_fake], fake_y_sub.iloc[train_index_fake]
-    return class_test(
+    legacy_scores = class_test(
         real_models,
         fake_models,
         [real_x_train, real_y_train],
         [fake_x_train, fake_y_train],
         [real_x_test, real_y_test],
         F1_type,
+        labels=labels,
     )
+    v2_scores = class_test(
+        real_models,
+        fake_models,
+        [real_x_train, real_y_train],
+        [fake_x_train, fake_y_train],
+        [real_x_test, real_y_test],
+        v2_score_type,
+        labels=labels,
+    )
+    return np.concatenate([legacy_scores, v2_scores], axis=0)
 
 class ClassificationAccuracy(MetricClass):
     """The Metric Class is an abstract class that interfaces with 
@@ -153,9 +225,9 @@ class ClassificationAccuracy(MetricClass):
         """ Set to 'privacy' or 'utility' """
         return 'utility'
 
-    def evaluate(self, cls_models = ['rf', 'adaboost', 'svm', 'logreg'], 
-                 F1_type: Literal['micro', 'macro', 'weighted'] = 'weighted', 
-                 k_folds: int = 5, 
+    def evaluate(self, cls_models = ['rf', 'adaboost', 'svm', 'logreg'],
+                 F1_type: Literal['micro', 'macro', 'weighted', 'balanced_accuracy'] = 'macro',
+                 k_folds: int = 5,
                  full_output: bool = False,
                  ) -> dict:
 
@@ -168,10 +240,11 @@ class ClassificationAccuracy(MetricClass):
                 - 'adaboost' : AdaBoost Classifier
                 - 'svm' : Support Vector Machine Classifier
                 - 'logreg' : Logistic Regression Classifier
-            F1_type (str): Type of F1 score to use
+            F1_type (str): Classification score to use
                 - 'micro' : Calculate metrics globally by counting the total true positives, false negatives and false positives.
                 - 'macro' : Calculate metrics for each label, and find their unweighted mean. I.e, emphasize the importance of rare labels.
                 - 'weighted' : Calculate metrics for each label, and find their average weighted by support.
+                - 'balanced_accuracy' : Calculate the mean recall over classes.
             k_folds (int): Number of folds to use in cross-validation
 
         Returns:
@@ -187,10 +260,17 @@ class ClassificationAccuracy(MetricClass):
         """
         if self.analysis_target is None:
             raise AssertionError("SynthEval(cls_acc): Analysis target variable(s) not set!")
+        if F1_type not in {'micro', 'macro', 'weighted', 'balanced_accuracy'}:
+            raise ValueError(
+                "SynthEval(cls_acc): F1_type must be 'macro', 'balanced_accuracy', "
+                "'weighted', or legacy 'micro'."
+            )
+        if not isinstance(k_folds, Integral) or k_folds < 2:
+            raise ValueError("SynthEval(cls_acc): k_folds must be an integer of at least 2.")
         
         target_vars = [
             key for (key, value) in self.analysis_target.target_types.items() 
-            if isinstance(value, int) and value >= 2
+            if isinstance(value, Integral) and value >= 2
             ]
 
         if target_vars == []:
@@ -203,6 +283,8 @@ class ClassificationAccuracy(MetricClass):
         self.k_folds = k_folds
         self.models = cls_models
         self.full_output = full_output
+        self.legacy_score_type = F1_type
+        self.score_type_v2 = _v2_score_type(F1_type)
 
         for target_var in target_vars:
             # Drop confounder variables for the current target variable (if any)
@@ -217,21 +299,25 @@ class ClassificationAccuracy(MetricClass):
                 hout_data = self.hout_data.drop(confounders, axis=1)
 
                 hout_x, hout_y = hout_data.drop([target_var], axis=1), hout_data[target_var]
+            else:
+                hout_x, hout_y = None, None
+
+            labels = _validate_target_support(
+                target_var, real_y, fake_y, hout_y, k_folds
+            )
+            v2_score_type = self.score_type_v2
 
             real_models = [_get_model(model_name) for model_name in cls_models]
             fake_models = [_get_model(model_name) for model_name in cls_models]
             target_var = target_var.replace(' ', '_').lower()
 
-            max_len = max(len(real_y), len(fake_y))
-            real_x_sub, real_y_sub = resample(real_x, real_y, n_samples=max_len, stratify=real_y, random_state=42)
-            fake_x_sub, fake_y_sub = resample(fake_x, fake_y, n_samples=max_len, stratify=fake_y, random_state=42)
-
-            kf = StratifiedKFold(n_splits=k_folds, random_state=42, shuffle=True)
-            splits = list(zip(kf.split(real_x_sub, real_y_sub), kf.split(fake_x_sub, fake_y_sub)))
+            real_kf = StratifiedKFold(n_splits=k_folds, random_state=42, shuffle=True)
+            fake_kf = StratifiedKFold(n_splits=k_folds, random_state=42, shuffle=True)
+            splits = list(zip(real_kf.split(real_x, real_y), fake_kf.split(fake_x, fake_y)))
             fold_args = [
                 (train_index_real, test_index_real, train_index_fake,
-                 real_x_sub, real_y_sub, fake_x_sub, fake_y_sub,
-                 real_models, fake_models, F1_type)
+                 real_x, real_y, fake_x, fake_y,
+                 real_models, fake_models, F1_type, v2_score_type, labels)
                 for (train_index_real, test_index_real), (train_index_fake, _) in splits
             ]
 
@@ -246,10 +332,21 @@ class ClassificationAccuracy(MetricClass):
                     for args in tqdm(fold_args, desc='cls_acc', disable=not self.verbose)
                 ]
 
-            class_avg = np.mean(res, axis=0)
-            class_err = np.std(res, axis=0, ddof=1) / np.sqrt(k_folds) if k_folds > 1 else np.zeros_like(class_avg)
-            class_diff = class_avg[1, :] - class_avg[0, :]
-            class_diff_err = np.sqrt(class_err[0, :] ** 2 + class_err[1, :] ** 2)
+            fold_scores = np.asarray(res, dtype=float)
+            legacy_fold_scores = fold_scores[:, :2, :]
+            v2_fold_scores = fold_scores[:, 2:, :]
+            class_avg = np.mean(legacy_fold_scores, axis=0)
+            class_err = np.std(legacy_fold_scores, axis=0, ddof=1) / np.sqrt(k_folds)
+            paired_differences = legacy_fold_scores[:, 1, :] - legacy_fold_scores[:, 0, :]
+            class_diff = np.mean(paired_differences, axis=0)
+            class_diff_err = np.std(paired_differences, axis=0, ddof=1) / np.sqrt(k_folds)
+            v2_class_avg = np.mean(v2_fold_scores, axis=0)
+            v2_class_err = np.std(v2_fold_scores, axis=0, ddof=1) / np.sqrt(k_folds)
+            v2_paired_differences = v2_fold_scores[:, 1, :] - v2_fold_scores[:, 0, :]
+            v2_class_diff = np.mean(v2_paired_differences, axis=0)
+            v2_class_diff_err = np.std(
+                v2_paired_differences, axis=0, ddof=1
+            ) / np.sqrt(k_folds)
 
             for i, model in enumerate(cls_models):
                 train_rows.append({
@@ -261,29 +358,60 @@ class ClassificationAccuracy(MetricClass):
                     'TSTR_err': class_err[1, i],
                     'acc_diff': class_diff[i],
                     'acc_diff_err': class_diff_err[i],
+                    'score_type_v2': v2_score_type,
+                    'score_trtr_v2': v2_class_avg[0, i],
+                    'score_trtr_err_v2': v2_class_err[0, i],
+                    'score_tstr_v2': v2_class_avg[1, i],
+                    'score_tstr_err_v2': v2_class_err[1, i],
+                    'score_diff_v2': v2_class_diff[i],
+                    'score_diff_err_v2': v2_class_diff_err[i],
                 })
 
             if self.hout_data is not None:
-                holdout_res = class_test(
+                holdout_legacy = class_test(
                     real_models,
                     fake_models,
                     [real_x, real_y],
                     [fake_x, fake_y],
                     [hout_x, hout_y],
                     F1_type,
+                    labels=labels,
+                )
+                holdout_v2 = class_test(
+                    real_models,
+                    fake_models,
+                    [real_x, real_y],
+                    [fake_x, fake_y],
+                    [hout_x, hout_y],
+                    v2_score_type,
+                    labels=labels,
                 )
                 for i, model in enumerate(cls_models):
                     test_rows.append({
                         'target_var': target_var,
                         'model': model,
-                        'TRTR_acc': holdout_res[0, i],
-                        'TSTR_acc': holdout_res[1, i],
-                        'acc_diff': holdout_res[1, i] - holdout_res[0, i],
+                        'TRTR_acc': holdout_legacy[0, i],
+                        'TSTR_acc': holdout_legacy[1, i],
+                        'acc_diff': holdout_legacy[1, i] - holdout_legacy[0, i],
                         'acc_diff_err': np.nan,
+                        'score_type_v2': v2_score_type,
+                        'score_trtr_v2': holdout_v2[0, i],
+                        'score_tstr_v2': holdout_v2[1, i],
+                        'score_diff_v2': holdout_v2[1, i] - holdout_v2[0, i],
+                        'score_diff_err_v2': np.nan,
                     })
 
-        train_cols = ['target_var', 'model', 'TRTR_acc', 'TRTR_err', 'TSTR_acc', 'TSTR_err', 'acc_diff', 'acc_diff_err']
-        test_cols = ['target_var', 'model', 'TRTR_acc', 'TSTR_acc', 'acc_diff', 'acc_diff_err']
+        train_cols = [
+            'target_var', 'model', 'TRTR_acc', 'TRTR_err', 'TSTR_acc', 'TSTR_err',
+            'acc_diff', 'acc_diff_err', 'score_type_v2', 'score_diff_v2',
+            'score_diff_err_v2', 'score_trtr_v2', 'score_trtr_err_v2',
+            'score_tstr_v2', 'score_tstr_err_v2',
+        ]
+        test_cols = [
+            'target_var', 'model', 'TRTR_acc', 'TSTR_acc', 'acc_diff',
+            'acc_diff_err', 'score_type_v2', 'score_diff_v2', 'score_diff_err_v2',
+            'score_trtr_v2', 'score_tstr_v2',
+        ]
         results_df_train = pd.DataFrame.from_records(train_rows, columns=train_cols)
         results_df_test = pd.DataFrame.from_records(test_rows, columns=test_cols)
 
@@ -292,10 +420,16 @@ class ClassificationAccuracy(MetricClass):
 
         self.results['avg diff'] = float(results_df_train['acc_diff'].mean())
         self.results['avg diff err'] = _propagated_err(results_df_train['acc_diff_err'])
+        self.results['score_type_v2'] = self.score_type_v2
+        self.results['legacy_score_type'] = self.legacy_score_type
+        self.results['avg diff v2'] = float(results_df_train['score_diff_v2'].mean())
+        self.results['avg diff err v2'] = _propagated_err(results_df_train['score_diff_err_v2'])
 
         if len(results_df_test) > 0:
             self.results['avg diff hout'] = float(results_df_test['acc_diff'].mean())
             self.results['avg diff err hout'] = _series_sem(results_df_test['acc_diff'])
+            self.results['avg diff hout v2'] = float(results_df_test['score_diff_v2'].mean())
+            self.results['avg diff err hout v2'] = _series_sem(results_df_test['score_diff_v2'])
         return self.results
     
     def format_output(self) -> list:
@@ -499,3 +633,52 @@ class ClassificationAccuracy(MetricClass):
                                 }])
             return output
         else: pass
+
+    def normalize_output_v2(self) -> list:
+        """Return score-specific v2 classification differences and agreement."""
+        if self.results == {}:
+            return []
+        score_name = (
+            'balanced_accuracy'
+            if self.results['score_type_v2'] == 'balanced_accuracy'
+            else f"{self.results['score_type_v2']}_F1"
+        )
+        metric_name = f'avg_{score_name}_diff_v2'
+        difference = self.results['avg diff v2']
+        difference_err = self.results.get('avg diff err v2')
+        rows = [{
+            'metric': metric_name,
+            'dim': 'u',
+            'val': difference,
+            'err': difference_err,
+            'n_val': float(np.clip(1.0 - abs(difference), 0.0, 1.0)),
+            'n_err': difference_err,
+            'metric_version': 'v2',
+            'raw_value': difference,
+            'normalized_value': float(np.clip(1.0 - abs(difference), 0.0, 1.0)),
+            'metadata': {
+                'score': self.results['score_type_v2'],
+                'uncertainty': 'paired_fold_difference_sem',
+                'primary_f1_is_not_micro': self.results['score_type_v2'] != 'micro',
+            },
+        }]
+        if len(self.results['test results']) > 0:
+            holdout_difference = self.results['avg diff hout v2']
+            holdout_err = self.results.get('avg diff err hout v2')
+            holdout_score = float(np.clip(1.0 - abs(holdout_difference), 0.0, 1.0))
+            rows.append({
+                'metric': f'{metric_name}_hout',
+                'dim': 'u',
+                'val': holdout_difference,
+                'err': holdout_err,
+                'n_val': holdout_score,
+                'n_err': holdout_err,
+                'metric_version': 'v2',
+                'raw_value': holdout_difference,
+                'normalized_value': holdout_score,
+                'metadata': {
+                    'score': self.results['score_type_v2'],
+                    'population': 'holdout',
+                },
+            })
+        return rows

@@ -3,11 +3,11 @@
 # Date: 18-08-2023
 
 from pandas import DataFrame
-from typing import List, Dict
+from typing import List
 from abc import ABC, abstractmethod
 
 from ...utils.variable_detection import get_cat_variables
-from ...utils.preprocessing import consistent_label_encoding
+from ...utils.preprocessing import TrainFittedPreprocessor
 from ...utils.configuration import AnalysisConfig, _analysis_target_parser
 
 class MetricClass(ABC):
@@ -49,7 +49,7 @@ class MetricClass(ABC):
                 num_cols = [column for column in real_data.columns if column not in cat_cols]
                 print('SynthEval: inferred categorical columns...')
                 
-            CLE = consistent_label_encoding(real_data, synt_data, cat_cols, num_cols, hout_data)
+            CLE = TrainFittedPreprocessor.fit(real_data, cat_cols, num_cols)
             real_data = CLE.encode(real_data)
             synt_data = CLE.encode(synt_data)
             if hout_data is not None: hout_data = CLE.encode(hout_data)
@@ -70,6 +70,10 @@ class MetricClass(ABC):
 
         self.nn_dist = nn_dist
         self.analysis_target = analysis_target
+        self.execution_context = kwargs.pop("execution_context", None)
+        self.pass_id = kwargs.pop("pass_id", "native")
+        self.target_view = kwargs.pop("target_view", "native")
+        self.group_context = kwargs.pop("group_context", None)
 
         self.results = {}
 

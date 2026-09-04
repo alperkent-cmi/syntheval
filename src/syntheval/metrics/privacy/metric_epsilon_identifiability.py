@@ -80,8 +80,24 @@ class EpsilonIdentifiability(MetricClass):
         W = [_column_entropy(real[:, i]) for i in range(x_dim)]
         W_adjust = 1/(np.array(W)+1e-16)
 
-        in_dists = _knn_distance(self.real_data,self.real_data,self.cat_cols,1,self.nn_dist,W_adjust)[0]
-        ext_distances = _knn_distance(self.real_data,self.synt_data,self.cat_cols,1,self.nn_dist,W_adjust)[0]
+        in_dists = _knn_distance(
+            self.real_data,
+            self.real_data,
+            self.cat_cols,
+            1,
+            self.nn_dist,
+            W_adjust,
+            same_dataset=True,
+        )[0]
+        ext_distances = _knn_distance(
+            self.real_data,
+            self.synt_data,
+            self.cat_cols,
+            1,
+            self.nn_dist,
+            W_adjust,
+            same_dataset=False,
+        )[0]
 
         R_Diff = ext_distances - in_dists
         identifiability_value = np.sum(R_Diff < 0) / float(no)
@@ -89,11 +105,30 @@ class EpsilonIdentifiability(MetricClass):
         self.results['eps_risk'] = float(identifiability_value)
 
         if self.hout_data is not None:
-            in_dists = _knn_distance(self.hout_data,self.hout_data,self.cat_cols,1,self.nn_dist,W_adjust)[0]
-            ext_distances = _knn_distance(self.hout_data,self.synt_data,self.cat_cols,1,self.nn_dist,W_adjust)[0]
+            holdout_count = len(self.hout_data)
+            if holdout_count == 0:
+                raise ValueError("Epsilon identifiability requires a non-empty holdout dataset")
+            in_dists = _knn_distance(
+                self.hout_data,
+                self.hout_data,
+                self.cat_cols,
+                1,
+                self.nn_dist,
+                W_adjust,
+                same_dataset=True,
+            )[0]
+            ext_distances = _knn_distance(
+                self.hout_data,
+                self.synt_data,
+                self.cat_cols,
+                1,
+                self.nn_dist,
+                W_adjust,
+                same_dataset=False,
+            )[0]
 
             R_Diff = ext_distances - in_dists
-            identifiability_value = np.sum(R_Diff < 0) / float(no)
+            identifiability_value = np.sum(R_Diff < 0) / float(holdout_count)
 
             self.results['priv_loss'] = float(self.results['eps_risk'] - identifiability_value)
 

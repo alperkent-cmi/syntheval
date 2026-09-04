@@ -8,11 +8,11 @@ import glob
 import time
 import threading
 import warnings
-import io
 from pathlib import Path
 
 import asyncio
 import traceback
+from datetime import datetime, timezone
 from tqdm import tqdm
 
 import pandas as pd
@@ -23,17 +23,18 @@ from pandas import DataFrame
 from .metrics import load_metrics
 from .utils.rich_console import RichConsole, in_notebook
 from .utils.ascii_console import AsciiConsole
-from .utils.preprocessing import consistent_label_encoding
+from .utils.preprocessing import TrainFittedPreprocessor
 from .utils.configuration import AnalysisConfig, _analysis_target_parser
 from .utils.postprocessing import extremes_ranking, linear_ranking, quantile_ranking, summation_ranking
 from .utils.variable_detection import get_cat_variables, check_missing_values
+from .execution import SynthEvalExecution, build_metric_execution, manifest_for_methods
 
 loaded_metrics = load_metrics()
 
 def _has_not_slash_backslash_or_dot(input_string):
     return not ('/' in input_string or '\\' in input_string or '.' in input_string)
 
-def _metric_work(method, evaluation_config, worker_args):
+def _metric_work(method, evaluation_config, worker_args, include_v2=False):
     warnings_list = []
     
     # Capture warnings during metric evaluation
@@ -44,17 +45,31 @@ def _metric_work(method, evaluation_config, worker_args):
             raw_result = M.evaluate(**evaluation_config)
             formatted_output = M.format_output()
             key_result = M.normalize_output()
+            key_result_v2 = None
+            if include_v2 and hasattr(M, "normalize_output_v2"):
+                key_result_v2 = M.normalize_output_v2()
             error = None
         except Exception as e:
-            raw_result, formatted_output, key_result, error = None, None, None, e
+            raw_result, formatted_output, key_result, key_result_v2, error = (
+                None,
+                None,
+                None,
+                None,
+                e,
+            )
         
         # Store any warnings that were raised
         warnings_list = [str(warning.message) for warning in w]
     
+    if include_v2:
+        return raw_result, formatted_output, key_result, error, warnings_list, key_result_v2
     return raw_result, formatted_output, key_result, error, warnings_list
 
-async def _run_metric_with_timeout(method, evaluation_config, worker_args, timeout):
-    return await asyncio.wait_for(asyncio.to_thread(_metric_work, method, evaluation_config, worker_args), timeout=timeout)
+async def _run_metric_with_timeout(method, evaluation_config, worker_args, timeout, include_v2=False):
+    return await asyncio.wait_for(
+        asyncio.to_thread(_metric_work, method, evaluation_config, worker_args, include_v2),
+        timeout=timeout,
+    )
 
 def _run_coroutine_sync(coro):
     """Run a coroutine from sync code, including notebook environments with a running loop."""
@@ -252,6 +267,149 @@ class SynthEval():
         print(loaded_metrics)
         pass
 
+    def _evaluate_with_execution(
+        self,
+        synthetic_dataframe: DataFrame,
+        analysis_target: AnalysisConfig | str,
+        presets_file: str,
+        expected_output_manifest,
+        pass_id: str,
+        target_view: str,
+        expected_manifest_digest,
+        metric_kwargs,
+        group_context=None,
+    ) -> SynthEvalExecution:
+        """Run metrics while retaining terminal per-method execution records."""
+        self._update_syn_data(synthetic_dataframe)
+
+        analysis_target_var = metric_kwargs.pop("analysis_target_var", None)
+        if (analysis_target is not None) or (analysis_target_var is not None):
+            analysis_target = _analysis_target_parser(self.real, analysis_target, analysis_target_var)
+
+        loaded_preset = {}
+        if presets_file is not None:
+            ext = presets_file.split(".")[-1].lower()
+            if _has_not_slash_backslash_or_dot(presets_file):
+                with open(os.path.dirname(__file__) + "/presets/" + presets_file + ".json", "r") as fp:
+                    loaded_preset = json.load(fp)
+            elif ext == "json":
+                with open(presets_file, "r") as fp:
+                    loaded_preset = json.load(fp)
+            else:
+                raise ValueError("Error: unrecognised preset keyword or file format!")
+
+        evaluation_config = {**loaded_preset, **metric_kwargs}
+        methods = list(evaluation_config.keys())
+        expected_manifest = manifest_for_methods(expected_output_manifest, methods)
+
+        CLE = TrainFittedPreprocessor.fit(
+            self.real,
+            self.categorical_columns,
+            self.numerical_columns,
+        )
+        real_data = CLE.encode(self.real)
+        synt_data = CLE.encode(self.synt)
+        hout_data = CLE.encode(self.hold_out) if self.hold_out is not None else None
+        worker_args = {
+            "real_data": real_data,
+            "synt_data": synt_data,
+            "hout_data": hout_data,
+            "cat_cols": self.categorical_columns,
+            "num_cols": self.numerical_columns,
+            "nn_dist": self.nn_dist,
+            "analysis_target": analysis_target,
+            "do_preprocessing": CLE,
+            "verbose": False,
+            "plot_figures": False,
+            "group_context": group_context,
+        }
+
+        executions = []
+        key_results = None
+        key_results_v2 = None
+        raw_results = {}
+        for method in methods:
+            started = time.perf_counter()
+            started_at = datetime.now(timezone.utc).isoformat()
+            if method not in loaded_metrics:
+                error = ValueError(f"Unrecognised keyword: {method}")
+                execution = build_metric_execution(
+                    method,
+                    None,
+                    expected_manifest[method],
+                    error=error,
+                    started_at=started_at,
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                    elapsed_seconds=time.perf_counter() - started,
+                )
+                executions.append(execution)
+                continue
+
+            raw = formatted_output = key_result = key_result_v2 = error = None
+            warnings_list = []
+            timed_out = False
+            try:
+                (
+                    raw,
+                    formatted_output,
+                    key_result,
+                    error,
+                    warnings_list,
+                    key_result_v2,
+                ) = _run_coroutine_sync(
+                    _run_metric_with_timeout(
+                        loaded_metrics[method],
+                        evaluation_config[method],
+                        worker_args,
+                        self.timeout,
+                        include_v2=True,
+                    )
+                )
+                if error is not None:
+                    raise error
+                raw_results[method] = raw
+                key_results = _add_key_results(key_results, key_result)
+                key_results_v2 = _add_key_results(key_results_v2, key_result_v2)
+            except asyncio.TimeoutError:
+                timed_out = True
+            except Exception as exc:
+                error = exc
+
+            execution = build_metric_execution(
+                method,
+                key_result,
+                expected_manifest[method],
+                status_key_result=key_result_v2,
+                normalized_rows_v2=key_result_v2,
+                raw_result=raw,
+                formatted_output=formatted_output,
+                error=error,
+                timed_out=timed_out,
+                warnings_list=warnings_list,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                elapsed_seconds=time.perf_counter() - started,
+            )
+            executions.append(execution)
+
+        self.analysis_target_config = analysis_target
+        self._raw_results = raw_results
+        execution_complete = all(item.status.execution_complete for item in executions)
+        result = SynthEvalExecution(
+            pass_id=pass_id,
+            target_view=target_view,
+            expected_manifest_digest=expected_manifest_digest,
+            metric_executions=tuple(executions),
+            normalized_table=key_results,
+            normalized_table_v2=key_results_v2,
+            execution_complete=execution_complete,
+            policy_eligible=False,
+            preprocessing_fingerprint=CLE.fingerprint,
+            preprocessing_metadata=CLE.metadata(),
+        )
+        self._execution_results = result
+        return result
+
     def evaluate(self, synthetic_dataframe: DataFrame, analysis_target: AnalysisConfig | str = None, presets_file: str = None, _dataset_name: str = None, **kwargs):
         """Method for generating the SynthEval evaluation report on a synthetic dataset. Includes the metrics specified in the 
         presets file or through the keyword arguments. Returns a dataframe with the primary results, and prints to console if 
@@ -281,6 +439,27 @@ class SynthEval():
             >>> isinstance(res, pd.DataFrame)
             True
         """
+        return_execution = kwargs.pop("return_execution", False)
+        expected_output_manifest = kwargs.pop("expected_output_manifest", None)
+        pass_id = kwargs.pop("pass_id", "native")
+        target_view = kwargs.pop("target_view", "native")
+        expected_manifest_digest = kwargs.pop("expected_manifest_digest", None)
+        group_context = kwargs.pop("group_context", None)
+        if return_execution:
+            if expected_output_manifest is None:
+                raise ValueError("return_execution=True requires expected_output_manifest")
+            return self._evaluate_with_execution(
+                synthetic_dataframe,
+                analysis_target,
+                presets_file,
+                expected_output_manifest,
+                pass_id,
+                target_view,
+                expected_manifest_digest,
+                kwargs,
+                group_context,
+            )
+
         self._update_syn_data(synthetic_dataframe)
 
         # Parse control kwargs before building metric evaluation config.
@@ -304,7 +483,11 @@ class SynthEval():
         
         evaluation_config = {**loaded_preset, **metric_kwargs}
 
-        CLE = consistent_label_encoding(self.real, self.synt, self.categorical_columns, self.numerical_columns, self.hold_out)
+        CLE = TrainFittedPreprocessor.fit(
+            self.real,
+            self.categorical_columns,
+            self.numerical_columns,
+        )
         real_data = CLE.encode(self.real)
         synt_data = CLE.encode(self.synt)
         if self.hold_out is not None: hout_data = CLE.encode(self.hold_out)
@@ -330,7 +513,8 @@ class SynthEval():
             'analysis_target' : analysis_target,
             'do_preprocessing': CLE,
             'verbose': self.verbose,
-            'plot_figures': self.enable_plots
+            'plot_figures': self.enable_plots,
+            'group_context': group_context,
         }
 
         raw_results = {}
@@ -366,7 +550,7 @@ class SynthEval():
                         error_counter += 1
                         co.update_runtime_table(method, "[bold yellow]T[/bold yellow]")
                         continue
-                    except Exception as e:
+                    except Exception:
                         error_counter += 1
                         error_message = traceback.format_exc()
                         co.add_error_message(message=error_message)

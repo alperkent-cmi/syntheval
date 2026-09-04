@@ -4,14 +4,58 @@
 
 import numpy as np
 import pandas as pd
+from numbers import Integral
 
 from syntheval.metrics.core.metric import MetricClass
 from syntheval.utils.plot_metrics import plot_roc_curves
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_curve, auc
+from sklearn.metrics import auc, roc_auc_score, roc_curve
 from sklearn.utils import resample
+
+
+def _binary_support(values):
+    series = pd.Series(values)
+    return tuple(value for value in pd.unique(series.dropna()))
+
+
+def _validate_binary_support(target_var, real_data, synt_data, hout_data):
+    real_support = _binary_support(real_data[target_var])
+    synt_support = _binary_support(synt_data[target_var])
+    hout_support = _binary_support(hout_data[target_var])
+    if len(real_support) != 2:
+        raise ValueError(
+            f"SynthEval(auroc): target {target_var!r} needs two real-training classes; "
+            f"observed {real_support!r}."
+        )
+    if len(synt_support) != 2 or set(synt_support) != set(real_support):
+        raise ValueError(
+            f"SynthEval(auroc): target {target_var!r} has incompatible synthetic class "
+            f"support {synt_support!r}; expected {real_support!r}."
+        )
+    if len(hout_support) != 2 or set(hout_support) != set(real_support):
+        raise ValueError(
+            f"SynthEval(auroc): target {target_var!r} has incompatible holdout class "
+            f"support {hout_support!r}; expected {real_support!r}."
+        )
+    return real_support
+
+
+def _sem(values):
+    values = np.asarray(values, dtype=float)
+    if values.size < 2:
+        return np.nan
+    return float(np.std(values, ddof=1) / np.sqrt(values.size))
+
+
+def auroc_agreement_v2(signed_difference):
+    """Return the bounded agreement score for a signed synthetic-minus-real AUC difference."""
+    difference = float(signed_difference)
+    if not np.isfinite(difference):
+        return np.nan
+    return float(np.clip(1.0 - abs(difference), 0.0, 1.0))
+
 
 class PredictionAUROCDifference(MetricClass):
     """The Metric Class is an abstract class that interfaces with 
@@ -59,26 +103,30 @@ class PredictionAUROCDifference(MetricClass):
             >>> AUROC = PredictionAUROCDifference(real, fake, hout, analysis_target='label',
             ...     verbose=False, do_preprocessing=False, plot_figures=False)
             >>> AUROC.evaluate(model='log_reg', num_boots=1) # doctest: +ELLIPSIS
-            {'model': 'log_reg', 'auroc results': ..., 'auroc_diff': 0.0}
+            {'model': 'log_reg', 'auroc results': ..., 'auroc_diff': 0.0, ...}
         """
         try:
             assert self.analysis_target is not None, "SynthEval(auroc): metric did not run, no analysis target variable(s) supplied!"
 
             target_vars = [
                 key for (key, value) in self.analysis_target.target_types.items() 
-                if isinstance(value, int) and value == 2
+                if isinstance(value, Integral) and value == 2
                 ]
             
             assert target_vars != [], "SynthEval(auroc): metric did not run, no categorical target variables with exactly 2 unique values!"
-            assert any(len(pd.unique(self.synt_data[var])) == 2 for var in target_vars), "SynthEval(auroc): metric did not run, synthetic data is monotonic in all the target variable(s)!"
             assert self.hout_data is not None, "SynthEval(auroc): metric did not run, no holdout data supplied!"
             assert model in ['rf_cls', 'log_reg'], "SynthEval(auroc): metric did not run, unrecognised model name supplied! Use 'rf_cls' or 'log_reg'."
+            if not isinstance(num_boots, Integral) or num_boots < 1:
+                raise ValueError("SynthEval(auroc): num_boots must be a positive integer.")
         except AssertionError as e:
             raise AssertionError(e)
         else:
             self.full_output = full_output
             result_rows = []
             for target_var in target_vars:
+                support = _validate_binary_support(
+                    target_var, self.real_data, self.synt_data, self.hout_data
+                )
                 # Drop confounder variables for the current target variable (if any)
                 confounders = self.analysis_target.confounder_vars[target_var]
                 real_data = self.real_data.drop(confounders, axis=1)
@@ -88,7 +136,8 @@ class PredictionAUROCDifference(MetricClass):
                 real_x, real_y = real_data.drop([target_var], axis=1), real_data[target_var]
                 fake_x, fake_y = synt_data.drop([target_var], axis=1), synt_data[target_var]
                 hout_x, hout_y = hout_data.drop([target_var], axis=1), hout_data[target_var]
-                target_var = target_var.replace(' ', '_').lower()
+                target_name = target_var.replace(' ', '_').lower()
+                hout_y_binary = (hout_y == support[1]).astype(int)
 
                 match model:
                     case 'rf_cls':
@@ -100,22 +149,32 @@ class PredictionAUROCDifference(MetricClass):
 
                 roc_curves_real = []
                 roc_curves_fake = []
+                v2_diffs = []
                 for i in range(num_boots):
                     if num_boots != 1:
-                        real_x_sub, real_y_sub = resample(real_x, real_y, n_samples=int(len(real_x)/2), stratify=real_y, random_state=i)
-                        fake_x_sub, fake_y_sub = resample(fake_x, fake_y, n_samples=int(len(fake_x)/2), stratify=fake_y, random_state=i)
+                        real_x_sub, real_y_sub = resample(
+                            real_x, real_y, n_samples=len(real_x), stratify=real_y, random_state=i
+                        )
+                        fake_x_sub, fake_y_sub = resample(
+                            fake_x, fake_y, n_samples=len(fake_x), stratify=fake_y, random_state=i
+                        )
                     else:
                         real_x_sub, real_y_sub = real_x, real_y
                         fake_x_sub, fake_y_sub = fake_x, fake_y
                 
                     model1.fit(real_x_sub, real_y_sub)
                     model2.fit(fake_x_sub, fake_y_sub)
-                    y1_probs = model1.predict_proba(hout_x)[:, 1]
-                    y2_probs = model2.predict_proba(hout_x)[:, 1]
+                    positive_index_real = int(np.flatnonzero(model1.classes_ == support[1])[0])
+                    positive_index_fake = int(np.flatnonzero(model2.classes_ == support[1])[0])
+                    y1_probs = model1.predict_proba(hout_x)[:, positive_index_real]
+                    y2_probs = model2.predict_proba(hout_x)[:, positive_index_fake]
+                    real_auc_v2 = roc_auc_score(hout_y_binary, y1_probs)
+                    synt_auc_v2 = roc_auc_score(hout_y_binary, y2_probs)
+                    v2_diffs.append(float(synt_auc_v2 - real_auc_v2))
                 
                     # Calculate ROC curve for the subsampled model
-                    fpr1, tpr1, _ = roc_curve(hout_y, y1_probs)
-                    fpr2, tpr2, _ = roc_curve(hout_y, y2_probs)
+                    fpr1, tpr1, _ = roc_curve(hout_y, y1_probs, pos_label=support[1])
+                    fpr2, tpr2, _ = roc_curve(hout_y, y2_probs, pos_label=support[1])
 
                     roc_curves_real.append((fpr1, tpr1))
                     roc_curves_fake.append((fpr2, tpr2))
@@ -144,22 +203,32 @@ class PredictionAUROCDifference(MetricClass):
                                                 [mean_fpr, mean_tpr_real, std_tpr_real], 
                                                 [mean_fpr, mean_tpr_fake, roc_auc_mean_fake],
                                                 [mean_fpr, mean_tpr_fake, std_tpr_fake],
-                                                f"{model}, predicting {target_var}", 'roc_curves_'+target_var)
+                                                f"{model}, predicting {target_name}", 'roc_curves_'+target_name)
                 
                 result_rows.append({
-                    'target_var': target_var,
+                    'target_var': target_name,
                     'model': model,
-                    'auroc_diff': float(roc_auc_mean_fake - roc_auc_mean_real)
+                    'auroc_diff': float(roc_auc_mean_fake - roc_auc_mean_real),
+                    'auroc_diff_v2': float(np.mean(v2_diffs)),
+                    'auroc_diff_err_v2': _sem(v2_diffs),
+                    'auroc_agreement_v2': auroc_agreement_v2(np.mean(v2_diffs)),
                 })
 
             self.results['model'] = model
 
-            columns = ['target_var', 'model', 'auroc_diff']
+            columns = [
+                'target_var', 'model', 'auroc_diff', 'auroc_diff_v2',
+                'auroc_diff_err_v2', 'auroc_agreement_v2',
+            ]
             self.results['auroc results'] = pd.DataFrame.from_records(result_rows, columns=columns)
 
             self.results['auroc_diff'] = float(self.results['auroc results']['auroc_diff'].mean())
             if len(self.results['auroc results']) > 1:
                 self.results['auroc_diff_err'] = float(self.results['auroc results']['auroc_diff'].sem()) 
+            self.results['auroc_diff_v2'] = float(self.results['auroc results']['auroc_diff_v2'].mean())
+            self.results['auroc_diff_err_v2'] = _sem(self.results['auroc results']['auroc_diff_v2'])
+            self.results['auroc_agreement_v2'] = auroc_agreement_v2(self.results['auroc_diff_v2'])
+            self.results['auroc_version_v2'] = 'signed_synthetic_minus_real'
             # self.results = {'model': model, 'auroc_diff': float(roc_auc_mean_fake - roc_auc_mean_real)}
             return self.results
         
@@ -177,7 +246,6 @@ class PredictionAUROCDifference(MetricClass):
             name1  u  0.0  0.0    0.0    0.0
             name2  p  0.0  0.0    0.0    0.0
         """
-        rows = []
         if self.results != {}:
             output = [{'metric': 'auroc', 'dim': 'u', 
                      'val': self.results['auroc_diff'],
@@ -193,3 +261,38 @@ class PredictionAUROCDifference(MetricClass):
                                 })
             return output
         else: pass
+
+    def normalize_output_v2(self) -> list:
+        """Return the versioned signed-difference and agreement identities."""
+        if self.results == {}:
+            return []
+        rows = [{
+            'metric': 'auroc_v2',
+            'dim': 'u',
+            'val': self.results['auroc_diff_v2'],
+            'err': self.results.get('auroc_diff_err_v2'),
+            'n_val': self.results['auroc_agreement_v2'],
+            'n_err': self.results.get('auroc_diff_err_v2'),
+            'metric_version': 'v2',
+            'raw_value': self.results['auroc_diff_v2'],
+            'normalized_value': self.results['auroc_agreement_v2'],
+            'metadata': {
+                'difference': 'synthetic_minus_real',
+                'agreement': '1-abs(difference)',
+            },
+        }]
+        if self.full_output:
+            for _, row in self.results['auroc results'].iterrows():
+                rows.append({
+                    'metric': f"auroc_{row['target_var']}_v2",
+                    'dim': 'u',
+                    'val': float(row['auroc_diff_v2']),
+                    'err': row['auroc_diff_err_v2'],
+                    'n_val': float(row['auroc_agreement_v2']),
+                    'n_err': row['auroc_diff_err_v2'],
+                    'metric_version': 'v2',
+                    'raw_value': float(row['auroc_diff_v2']),
+                    'normalized_value': float(row['auroc_agreement_v2']),
+                    'metadata': {'target_var': row['target_var']},
+                })
+        return rows
