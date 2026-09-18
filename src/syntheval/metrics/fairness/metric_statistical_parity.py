@@ -45,7 +45,7 @@ class StatisticalParity(MetricClass):
 
         Args:
             X (pd.DataFrame): the data to compute the metric on
-            S (str): the name of the sensitive attribute column in X
+            S (str): the name of the protected attribute column in X
             preds (np.ndarray | pd.Series): the predictions from a classifier to compute the metric on
             positive_pred (int, optional): the positive class of the classifier, either 0 or 1, by default 1
         
@@ -64,7 +64,7 @@ class StatisticalParity(MetricClass):
         assert len(X) == len(
             preds
         )  # Check that the length of the data and the predictions are the same
-        assert S in X.columns  # Check that the sensitive attribute is in the data
+        assert S in X.columns  # Check that the protected attribute is in the data
         assert positive_pred in [
             0,
             1,
@@ -98,14 +98,14 @@ class StatisticalParity(MetricClass):
             >>> from syntheval import AnalysisConfig
             >>> real = pd.DataFrame({'A': [0, 1, 0, 1], 'B': [1, 0, 1, 0], 'label': [0, 1, 0, 1]})
             >>> fake = pd.DataFrame({'A': [0, 1, 0, 1], 'B': [1, 0, 1, 0], 'label': [0, 1, 0, 1]})
-            >>> config = AnalysisConfig(dataset=real, target_vars='label', sensitive_vars=['A'])
+             >>> config = AnalysisConfig(dataset=real, target_vars='label', protected_vars=['A'])
             >>> SP = StatisticalParity(real, fake, analysis_target=config, do_preprocessing=False)
             >>> SP.evaluate(folds=2) # doctest: +ELLIPSIS
             {'statistical_parity': 1.0, ...
         """
         try:
             assert self.analysis_target is not None, "SynthEval(stat parity): metric did not run, no analysis target variable object specified!"
-            assert self.analysis_target.sensitive_vars is not None, "SynthEval(stat parity): metric did not run, no sensitive variable specified!"
+            assert self.analysis_target.protected_vars, "SynthEval(stat parity): metric did not run, no protected variable specified!"
             
             target_vars = [
                 key for (key, value) in self.analysis_target.target_types.items() 
@@ -114,8 +114,8 @@ class StatisticalParity(MetricClass):
             
             assert target_vars != [], "SynthEval(stat parity): metric did not run, no categorical target variables with exactly 2 unique values!"
             
-            protected_attributes = [var for var in self.analysis_target.sensitive_vars if self.real_data[var].nunique() == 2]
-            assert protected_attributes != [], "SynthEval(stat parity): metric did not run, no sensitive variables with exactly 2 unique values!"
+            protected_attributes = [var for var in self.analysis_target.protected_vars if self.real_data[var].nunique() == 2]
+            assert protected_attributes != [], "SynthEval(stat parity): metric did not run, no protected variables with exactly 2 unique values!"
 
             assert positive_class in [0, 1], "SynthEval(stat parity): metric did not run, the positive class argument must be either 0 or 1"
         except AssertionError as e:

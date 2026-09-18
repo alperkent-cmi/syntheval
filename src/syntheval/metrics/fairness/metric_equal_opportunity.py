@@ -50,8 +50,8 @@ class EqualOpportunity(MetricClass):
         TPR = P(Yhat = positive | Y = positive, S = group). The metric is the difference TPR(S=1) - TPR(S=0).
 
         Args:
-            X (pd.DataFrame): the data to compute the metric on (must contain the sensitive attribute column)
-            S (str): the name of the sensitive attribute column in X
+             X (pd.DataFrame): the data to compute the metric on (must contain the protected attribute column)
+             S (str): the name of the protected attribute column in X
             y_true (np.ndarray | pd.Series): the ground-truth labels aligned with the predictions
             preds (np.ndarray | pd.Series): the predictions from a classifier to compute the metric on
             positive_pred (int, optional): the positive class of the classifier, either 0 or 1, by default 1
@@ -73,7 +73,7 @@ class EqualOpportunity(MetricClass):
             preds
         )  # Check that the length of the data and the predictions are the same
         assert len(X) == len(y_true)  # Check that the labels align with the data
-        assert S in X.columns  # Check that the sensitive attribute is in the data
+        assert S in X.columns  # Check that the protected attribute is in the data
         assert positive_pred in [
             0,
             1,
@@ -116,8 +116,8 @@ class EqualOpportunity(MetricClass):
             assert self.analysis_target is not None, (
                 "SynthEval(equal opportunity): metric did not run, no analysis target variable object specified!"
             )
-            assert self.analysis_target.sensitive_vars is not None, (
-                "SynthEval(equal opportunity): metric did not run, no sensitive variable specified!"
+            assert self.analysis_target.protected_vars, (
+                "SynthEval(equal opportunity): metric did not run, no protected variable specified!"
             )
 
             target_vars = [
@@ -132,11 +132,11 @@ class EqualOpportunity(MetricClass):
 
             protected_attributes = [
                 var
-                for var in self.analysis_target.sensitive_vars
+                for var in self.analysis_target.protected_vars
                 if self.real_data[var].nunique() == 2
             ]
             assert protected_attributes != [], (
-                "SynthEval(equal opportunity): metric did not run, no sensitive variables with exactly 2 unique values!"
+                "SynthEval(equal opportunity): metric did not run, no protected variables with exactly 2 unique values!"
             )
 
             assert positive_class in [0, 1], (

@@ -3,8 +3,166 @@ import math
 import pandas as pd
 
 from syntheval.execution import build_metric_execution
+from syntheval.metrics.fairness.metric_equal_opportunity import EqualOpportunity
+from syntheval.metrics.fairness.metric_equalized_odds import EqualizedOdds
+from syntheval.metrics.fairness.metric_statistical_parity import StatisticalParity
+from syntheval.metrics.privacy.metric_AttrDis import AttributeDisclosure
 from syntheval.syntheval import SynthEval
 import syntheval.syntheval as syntheval_module
+from syntheval.utils.configuration import AnalysisConfig, _analysis_target_parser
+
+
+def test_analysis_config_keeps_sensitive_and_protected_roles_separate():
+    data = pd.DataFrame({"target": [0, 1], "secret": ["a", "b"], "group": [0, 1]})
+
+    config = AnalysisConfig(
+        data, "target", sensitive_vars=["secret"], protected_vars=["group"]
+    )
+
+    assert config.sensitive_vars == ["secret"]
+    assert config.protected_vars == ["group"]
+
+
+def test_analysis_config_omitted_protected_vars_are_empty_and_json_loading_is_safe(tmp_path):
+    data = pd.DataFrame({"target": [0, 1], "secret": ["a", "b"]})
+    config = AnalysisConfig(data, "target", sensitive_vars=["secret"])
+    assert config.sensitive_vars == ["secret"]
+    assert config.protected_vars == []
+
+    path = tmp_path / "legacy.json"
+    path.write_text(
+        '{"target_vars": ["target"], "target_types": {"target": 2}, '
+        '"confounder_vars": {"target": []}, "sensitive_vars": ["secret"]}'
+    )
+    loaded = _analysis_target_parser(data, str(path))
+    assert loaded.sensitive_vars == ["secret"]
+    assert loaded.protected_vars == []
+
+
+def test_analysis_config_keeps_sensitive_vars_for_disclosure_when_protected_is_omitted():
+    data = pd.DataFrame({"target": [0, 1], "secret": ["a", "b"]})
+    config = AnalysisConfig(data, "target", sensitive_vars=["secret"])
+
+    assert config.sensitive_vars == ["secret"]
+    assert config.protected_vars == []
+
+
+def test_attribute_disclosure_keeps_using_sensitive_vars_when_protected_is_omitted():
+    data = pd.DataFrame(
+        {
+            "target": [0, 1, 0, 1],
+            "secret": ["a", "b", "a", "b"],
+            "feature": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    config = AnalysisConfig(data, "target", sensitive_vars=["secret"])
+    metric = AttributeDisclosure(
+        data,
+        data.copy(),
+        cat_cols=["target", "secret"],
+        num_cols=["feature"],
+        analysis_target=config,
+        do_preprocessing=False,
+    )
+
+    metric.evaluate()
+
+    assert metric.analysis_target.sensitive_vars == ["secret"]
+    assert metric.analysis_target.protected_vars == []
+
+
+def test_fairness_reports_missing_protected_input_instead_of_using_sensitive_vars():
+    data = pd.DataFrame(
+        {
+            "target": [0, 1, 0, 1],
+            "secret": [0, 1, 0, 1],
+        }
+    )
+    config = AnalysisConfig(data, "target", sensitive_vars=["secret"])
+
+    try:
+        StatisticalParity(
+            data, data, analysis_target=config, do_preprocessing=False
+        ).evaluate(folds=2)
+    except ValueError as error:
+        assert str(error) == (
+            "SynthEval(stat parity): metric did not run, "
+            "no protected variable specified!"
+        )
+    else:
+        raise AssertionError("fairness metric unexpectedly used sensitive_vars")
+
+
+def test_analysis_config_serializes_protected_vars(tmp_path):
+    data = pd.DataFrame({"target": [0, 1], "secret": ["a", "b"], "group": [0, 1]})
+    config = AnalysisConfig(data, "target", sensitive_vars=["secret"], protected_vars=["group"])
+    config.save(str(tmp_path / "config"))
+
+    saved = (tmp_path / "config.json").read_text()
+    assert '"protected_vars": ["group"]' in saved
+    loaded = _analysis_target_parser(data, str(tmp_path / "config.json"))
+    assert loaded.sensitive_vars == ["secret"]
+    assert loaded.protected_vars == ["group"]
+
+
+def test_statistical_parity_uses_protected_role_not_disclosure_role():
+    data = pd.DataFrame(
+        {
+            "target": [0, 1, 0, 1, 0, 1],
+            "secret": [0, 1, 2, 0, 1, 2],
+            "group": [0, 1, 0, 1, 0, 1],
+            "feature": [1, 2, 3, 4, 5, 6],
+        }
+    )
+    config = AnalysisConfig(
+        data, "target", sensitive_vars=["secret"], protected_vars=["group"]
+    )
+
+    result = StatisticalParity(
+        data, data, analysis_target=config, do_preprocessing=False
+    ).evaluate(folds=2)
+
+    assert result["raw results"]["protected_attribute"].tolist() == ["group"]
+
+
+def test_equal_opportunity_uses_protected_role_not_disclosure_role():
+    data = pd.DataFrame(
+        {
+            "target": [0, 1, 0, 1, 0, 1],
+            "secret": [0, 1, 2, 0, 1, 2],
+            "group": [0, 1, 0, 1, 0, 1],
+            "feature": [1, 2, 3, 4, 5, 6],
+        }
+    )
+    config = AnalysisConfig(
+        data, "target", sensitive_vars=["secret"], protected_vars=["group"]
+    )
+
+    result = EqualOpportunity(
+        data, data, analysis_target=config, do_preprocessing=False
+    ).evaluate(folds=2)
+
+    assert result["raw results"]["protected_attribute"].tolist() == ["group"]
+
+
+def test_equalized_odds_uses_protected_role_not_disclosure_role():
+    data = pd.DataFrame(
+        {
+            "target": [0, 1, 0, 1, 0, 1],
+            "secret": [0, 1, 2, 0, 1, 2],
+            "group": [0, 1, 0, 1, 0, 1],
+            "feature": [1, 2, 3, 4, 5, 6],
+        }
+    )
+    config = AnalysisConfig(
+        data, "target", sensitive_vars=["secret"], protected_vars=["group"]
+    )
+
+    result = EqualizedOdds(
+        data, data, analysis_target=config, do_preprocessing=False
+    ).evaluate(folds=2)
+
+    assert result["raw results"]["protected_attribute"].tolist() == ["group"]
 
 
 def test_metric_execution_accounts_for_missing_duplicate_and_unexpected_keys():

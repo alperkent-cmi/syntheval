@@ -14,7 +14,8 @@ class AnalysisConfig:
         dataset (pd.DataFrame) : the dataset to analyze (used only for inferring variable types)
         target_vars (str|list) : column name(s) of the target variable(s)
         confounder_vars (str|list|dict) : column name(s) of the confounder variable(s)
-        sensitive_vars (str|list) : column name(s) of the sensitive variable(s)
+        sensitive_vars (str|list) : column name(s) targeted by attribute disclosure
+        protected_vars (str|list) : column name(s) used as fairness subgroups
         auto_exclusive (bool) : whether to automatically enforce mutual exclusivity of target variables
         save_config_name (str) : save the config to a json file with this name (without .json extension)
 
@@ -23,13 +24,15 @@ class AnalysisConfig:
         analysis_config = AnalysisConfig(
             dataset=train_df,
             target_vars='Status',
-            confounder_vars={'Status': ['Age', 'Tumor_Size']},
-            sensitive_vars=['Age']
+         confounder_vars={'Status': ['Age', 'Tumor_Size']},
+             sensitive_vars=['Age'],
+             protected_vars=['Sex']
         )
         SE.evaluate(synt_df, analysis_target = analysis_config)
     """
     def __init__(self, dataset: DataFrame, target_vars: list | str, confounder_vars: list | str | dict = None, 
-                 sensitive_vars: list | str = None, auto_exclusive: bool = False):
+                 sensitive_vars: list | str = None, auto_exclusive: bool = False,
+                 protected_vars: list | str = None):
         self.target_vars = target_vars if isinstance(target_vars, list) else [target_vars]
 
         self.target_types = {}
@@ -61,6 +64,14 @@ class AnalysisConfig:
                         self.confounder_vars[other_var].append(var)
             
         self.sensitive_vars = sensitive_vars if isinstance(sensitive_vars, list) else [sensitive_vars]
+        # Roles are explicit: omitted protected variables must not inherit
+        # sensitive disclosure targets. Fairness metrics handle an empty role
+        # as missing protected input.
+        if protected_vars is None:
+            protected_vars = []
+        self.protected_vars = (
+            protected_vars if isinstance(protected_vars, list) else [protected_vars]
+        )
         pass
 
     def save(self, path: str = "SE_analysis_config"):
@@ -70,7 +81,8 @@ class AnalysisConfig:
                 "target_vars": self.target_vars,
                 "target_types": self.target_types,
                 "confounder_vars": self.confounder_vars,
-                "sensitive_vars": self.sensitive_vars
+                "sensitive_vars": self.sensitive_vars,
+                "protected_vars": self.protected_vars,
             }, json_file)
     
 def _analysis_target_parser(real_data, analysis_target, analysis_target_var = None) -> AnalysisConfig:
@@ -97,6 +109,9 @@ def _analysis_target_parser(real_data, analysis_target, analysis_target_var = No
                     target_vars=config_dict['target_vars'],
                     confounder_vars=config_dict['confounder_vars'],
                     sensitive_vars=config_dict['sensitive_vars'],
+                    # Legacy configs have no protected role. Keep it empty
+                    # rather than inferring fairness groups from disclosures.
+                    protected_vars=config_dict.get('protected_vars', []),
                 )
             analysis_target.target_types = config_dict['target_types']
 
