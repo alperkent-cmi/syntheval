@@ -2,34 +2,105 @@
 # Author: Anton D. Lautrup & T. Hyrup
 # Date: 16-08-2023
 
-import os
-import json
-import glob
-import time
-import threading
-import warnings
-from pathlib import Path
-
 import asyncio
+import glob
+import json
+import logging
+import os
+import threading
+import time
 import traceback
+import warnings
+from dataclasses import replace
 from datetime import datetime, timezone
-from tqdm import tqdm
+from pathlib import Path
+from typing import Dict, List, Literal
 
 import pandas as pd
-from rich.live import Live
-from typing import Literal, List, Dict
 from pandas import DataFrame
+from rich.live import Live
+from tqdm import tqdm
 
-from .metrics import load_metrics
-from .utils.rich_console import RichConsole, in_notebook
-from .utils.ascii_console import AsciiConsole
-from .utils.preprocessing import TrainFittedPreprocessor
-from .utils.configuration import AnalysisConfig, _analysis_target_parser
-from .utils.postprocessing import extremes_ranking, linear_ranking, quantile_ranking, summation_ranking
-from .utils.variable_detection import get_cat_variables, check_missing_values
 from .execution import SynthEvalExecution, build_metric_execution, manifest_for_methods
+from .metrics import load_metrics
+from .utils.ascii_console import AsciiConsole
+from .utils.configuration import AnalysisConfig, _analysis_target_parser
+from .utils.postprocessing import (
+    extremes_ranking,
+    linear_ranking,
+    quantile_ranking,
+    summation_ranking,
+)
+from .utils.preprocessing import TrainFittedPreprocessor
+from .utils.rich_console import RichConsole, in_notebook
+from .utils.variable_detection import check_missing_values, get_cat_variables
 
 loaded_metrics = load_metrics()
+logger = logging.getLogger(__name__)
+
+
+class RealHoldoutUnknownCategoryError(ValueError):
+    """Unknown real holdout category unsupported by a selected metric."""
+
+
+# These metrics compare categorical values through Gower's equality-based
+# categorical component. Their -1 unknown code is therefore a distinct nominal
+# value, not an ordered numeric level.
+_NOMINAL_UNKNOWN_HOLDOUT_METRICS = frozenset({"nndr", "nnaa", "eps_risk"})
+_NOMINAL_CATEGORICAL_DISTANCE_METRICS = frozenset({"gower", "EXPERIMENTAL_gower"})
+_HOLDOUT_SENSITIVE_METRICS = frozenset(
+    {"auroc_diff", "cls_acc", "mia", "att_discl", *_NOMINAL_UNKNOWN_HOLDOUT_METRICS}
+)
+
+
+def _supports_nominal_unknown_holdout(method, nn_distance):
+    return (
+        method in _NOMINAL_UNKNOWN_HOLDOUT_METRICS
+        and nn_distance in _NOMINAL_CATEGORICAL_DISTANCE_METRICS
+    )
+
+
+def _safe_progress_exception_type(error):
+    """Return exception class name only when it is a safe identifier."""
+    if error is None:
+        return None
+    name = type(error).__name__ if not isinstance(error, str) else error
+    if all(part.isidentifier() for part in name.split(".")):
+        return name
+    return "UnknownError"
+
+
+def _emit_method_progress(callback, *, event, model_name, method, started, outcome, error=None):
+    """Emit one safe structured per-method progress event when requested."""
+    if callback is None:
+        return
+    exception_type = _safe_progress_exception_type(error)
+    failure_class = None
+    if outcome == "blocked":
+        failure_class = "real_holdout_unknown_category"
+    elif outcome == "timed_out":
+        failure_class = "timeout"
+    elif outcome == "failed":
+        failure_class = exception_type or "metric_validation_failed"
+    try:
+        callback(
+            {
+                "event": event,
+                "model_name": model_name,
+                "method": str(method),
+                "duration_seconds": max(0.0, time.perf_counter() - started),
+                "outcome": outcome,
+                "exception_type": exception_type,
+                "failure_class": failure_class,
+            }
+        )
+    except Exception as exc:
+        # Progress is telemetry, never part of metric execution. Keep callback
+        # diagnostics safe and do not expose the exception message or traceback.
+        logger.warning(
+            "SynthEval progress callback failed; evaluation continues (exception_type=%s)",
+            _safe_progress_exception_type(exc),
+        )
 
 def _has_not_slash_backslash_or_dot(input_string):
     return not ('/' in input_string or '\\' in input_string or '.' in input_string)
@@ -278,6 +349,8 @@ class SynthEval():
         expected_manifest_digest,
         metric_kwargs,
         group_context=None,
+        progress_callback=None,
+        model_name=None,
     ) -> SynthEvalExecution:
         """Run metrics while retaining terminal per-method execution records."""
         self._update_syn_data(synthetic_dataframe)
@@ -309,7 +382,20 @@ class SynthEval():
         )
         real_data = CLE.encode(self.real)
         synt_data = CLE.encode(self.synt)
-        hout_data = CLE.encode(self.hold_out) if self.hold_out is not None else None
+        holdout_unknown_categories = (
+            CLE.unknown_categorical_columns(self.hold_out)
+            if self.hold_out is not None
+            else {}
+        )
+        hout_data = (
+            CLE.encode(
+                self.hold_out,
+                role="real_holdout",
+                allow_unknown_categories=True,
+            )
+            if self.hold_out is not None
+            else None
+        )
         worker_args = {
             "real_data": real_data,
             "synt_data": synt_data,
@@ -331,6 +417,14 @@ class SynthEval():
         for method in methods:
             started = time.perf_counter()
             started_at = datetime.now(timezone.utc).isoformat()
+            _emit_method_progress(
+                progress_callback,
+                event="started",
+                model_name=model_name,
+                method=method,
+                started=started,
+                outcome="running",
+            )
             if method not in loaded_metrics:
                 error = ValueError(f"Unrecognised keyword: {method}")
                 execution = build_metric_execution(
@@ -343,6 +437,48 @@ class SynthEval():
                     elapsed_seconds=time.perf_counter() - started,
                 )
                 executions.append(execution)
+                _emit_method_progress(
+                    progress_callback,
+                    event="failure",
+                    model_name=model_name,
+                    method=method,
+                    started=started,
+                    outcome="failed",
+                    error=error,
+                )
+                continue
+
+            allows_nominal_unknown = _supports_nominal_unknown_holdout(method, self.nn_dist)
+            if (
+                holdout_unknown_categories
+                and method in _HOLDOUT_SENSITIVE_METRICS
+                and not allows_nominal_unknown
+            ):
+                error = RealHoldoutUnknownCategoryError(
+                    "Real holdout contains categorical values absent from train; "
+                    f"metric={method}, columns={sorted(holdout_unknown_categories)}"
+                )
+                blocked = build_metric_execution(
+                    method,
+                    None,
+                    expected_manifest[method],
+                    error=error,
+                    started_at=started_at,
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                    elapsed_seconds=time.perf_counter() - started,
+                )
+                executions.append(
+                    replace(blocked, status=replace(blocked.status, state="blocked"))
+                )
+                _emit_method_progress(
+                    progress_callback,
+                    event="failure",
+                    model_name=model_name,
+                    method=method,
+                    started=started,
+                    outcome="blocked",
+                    error=error,
+                )
                 continue
 
             raw = formatted_output = key_result = key_result_v2 = error = None
@@ -391,10 +527,41 @@ class SynthEval():
                 elapsed_seconds=time.perf_counter() - started,
             )
             executions.append(execution)
+            outcome = execution.status.state
+            _emit_method_progress(
+                progress_callback,
+                event="completed" if outcome == "succeeded" else "failure",
+                model_name=model_name,
+                method=method,
+                started=started,
+                outcome=outcome,
+                error=error,
+            )
 
         self.analysis_target_config = analysis_target
         self._raw_results = raw_results
         execution_complete = all(item.status.execution_complete for item in executions)
+        preprocessing_metadata = CLE.metadata()
+        if holdout_unknown_categories:
+            nominal_unknown_methods = sorted(
+                method
+                for method in methods
+                if _supports_nominal_unknown_holdout(method, self.nn_dist)
+            )
+            blocked_unknown_methods = sorted(
+                method
+                for method in methods
+                if method in _HOLDOUT_SENSITIVE_METRICS
+                and method not in nominal_unknown_methods
+            )
+            preprocessing_metadata.update(
+                {
+                    "real_holdout_unknown_categories": holdout_unknown_categories,
+                    "real_holdout_unknown_representation": -1,
+                    "real_holdout_unknown_nominal_metrics": nominal_unknown_methods,
+                    "real_holdout_unknown_blocked_metrics": blocked_unknown_methods,
+                }
+            )
         result = SynthEvalExecution(
             pass_id=pass_id,
             target_view=target_view,
@@ -405,7 +572,7 @@ class SynthEval():
             execution_complete=execution_complete,
             policy_eligible=False,
             preprocessing_fingerprint=CLE.fingerprint,
-            preprocessing_metadata=CLE.metadata(),
+            preprocessing_metadata=preprocessing_metadata,
         )
         self._execution_results = result
         return result
@@ -445,6 +612,8 @@ class SynthEval():
         target_view = kwargs.pop("target_view", "native")
         expected_manifest_digest = kwargs.pop("expected_manifest_digest", None)
         group_context = kwargs.pop("group_context", None)
+        progress_callback = kwargs.pop("progress_callback", None)
+        model_name = _dataset_name
         if return_execution:
             if expected_output_manifest is None:
                 raise ValueError("return_execution=True requires expected_output_manifest")
@@ -458,6 +627,8 @@ class SynthEval():
                 expected_manifest_digest,
                 kwargs,
                 group_context,
+                progress_callback,
+                model_name,
             )
 
         self._update_syn_data(synthetic_dataframe)
@@ -490,8 +661,33 @@ class SynthEval():
         )
         real_data = CLE.encode(self.real)
         synt_data = CLE.encode(self.synt)
-        if self.hold_out is not None: hout_data = CLE.encode(self.hold_out)
-        else: hout_data = None
+        holdout_unknown_categories = (
+            CLE.unknown_categorical_columns(self.hold_out)
+            if self.hold_out is not None
+            else {}
+        )
+        if holdout_unknown_categories:
+            unsupported_methods = sorted(
+                method
+                for method in evaluation_config
+                if method in _HOLDOUT_SENSITIVE_METRICS
+                and not _supports_nominal_unknown_holdout(method, self.nn_dist)
+            )
+            if unsupported_methods:
+                raise RealHoldoutUnknownCategoryError(
+                    "Real holdout contains categorical values absent from train; "
+                    f"unsupported metrics={unsupported_methods}, "
+                    f"columns={sorted(holdout_unknown_categories)}"
+                )
+        hout_data = (
+            CLE.encode(
+                self.hold_out,
+                role="real_holdout",
+                allow_unknown_categories=bool(holdout_unknown_categories),
+            )
+            if self.hold_out is not None
+            else None
+        )
 
         methods = evaluation_config.keys()
 

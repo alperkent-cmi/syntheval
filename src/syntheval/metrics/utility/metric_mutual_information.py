@@ -2,21 +2,22 @@
 # Author: Anton D. Lautrup
 # Date: 21-08-2023
 
-import numpy as np
-import pandas as pd
 import hashlib
 import json
+import os
 
-from joblib import Parallel, delayed
-
-from syntheval.metrics.core.metric import MetricClass
-
-from syntheval.utils.plot_metrics import plot_matrix_heatmap
+import numpy as np
+import pandas as pd
+from joblib import Parallel, cpu_count, delayed
 from sklearn.metrics import normalized_mutual_info_score
+from syntheval.metrics.core.metric import MetricClass
+from syntheval.utils.plot_metrics import plot_matrix_heatmap
 
 #: Below this column count, the row-parallel path isn't worth the loky
 #: process-pool overhead (~0.1-0.5s) -- e.g. small doctest-sized inputs.
 _PARALLEL_MIN_COLS = 50
+_V2_PARALLEL_MIN_PAIRS = 32
+_V2_MAX_CHUNK_PAIRS = 512
 
 def _pairwise_attributes_mutual_information(data):
     """Compute normalized mutual information for all pairwise attributes.
@@ -138,21 +139,78 @@ def _resolve_columns_v2(real_data, num_cols, cat_cols):
     return numerical, categorical
 
 
+def _mi_v2_worker_count(pair_count):
+    """Choose workers bounded by joblib and the configured per-model budget."""
+    if pair_count < _V2_PARALLEL_MIN_PAIRS:
+        return 1
+    available = cpu_count()
+    configured_limit = os.environ.get('LOKY_MAX_CPU_COUNT')
+    if configured_limit is not None:
+        available = min(available, int(configured_limit))
+    return min(max(1, available), pair_count)
+
+
+def _mi_v2_pair_chunks(column_count, chunk_size):
+    """Yield bounded upper-triangle coordinates in matrix order."""
+    chunk = []
+    for left_index in range(column_count):
+        for right_index in range(left_index + 1, column_count):
+            chunk.append((left_index, right_index))
+            if len(chunk) == chunk_size:
+                yield chunk
+                chunk = []
+    if chunk:
+        yield chunk
+
+
+def _mi_v2_pair_chunk(codes, pairs):
+    """Compute one bounded pair chunk and retain each pair's matrix position."""
+    values = []
+    for left_index, right_index in pairs:
+        value = normalized_mutual_info_score(
+            codes[:, left_index], codes[:, right_index], average_method='arithmetic'
+        )
+        values.append((left_index, right_index, value))
+    return os.getpid(), values
+
+
 def _pairwise_nmi_v2(codes):
     columns = list(codes.columns)
     matrix = np.full((len(columns), len(columns)), np.nan, dtype=float)
     np.fill_diagonal(matrix, 1.0)
-    for left_index, left in enumerate(columns):
-        for right_index in range(left_index + 1, len(columns)):
-            right = columns[right_index]
-            if len(codes) < 2:
-                continue
-            value = normalized_mutual_info_score(
-                codes[left], codes[right], average_method='arithmetic'
-            )
-            if np.isfinite(value):
-                matrix[left_index, right_index] = float(np.clip(value, 0.0, 1.0))
-                matrix[right_index, left_index] = matrix[left_index, right_index]
+
+    def store_pair_value(left_index, right_index, value):
+        if np.isfinite(value):
+            matrix[left_index, right_index] = float(np.clip(value, 0.0, 1.0))
+            matrix[right_index, left_index] = matrix[left_index, right_index]
+
+    pair_count = len(columns) * (len(columns) - 1) // 2
+    workers = _mi_v2_worker_count(pair_count)
+    code_values = codes.to_numpy(copy=False)
+    if workers > 1 and len(codes) >= 2:
+        chunk_size = max(1, (pair_count + workers * 4 - 1) // (workers * 4))
+        chunk_size = min(chunk_size, _V2_MAX_CHUNK_PAIRS)
+        parallel = Parallel(
+            n_jobs=workers,
+            backend='loky',
+            return_as='generator',
+            batch_size=1,
+            pre_dispatch=workers,
+        )
+        chunks = _mi_v2_pair_chunks(len(columns), chunk_size)
+        tasks = (delayed(_mi_v2_pair_chunk)(code_values, pairs) for pairs in chunks)
+        for _worker_pid, pair_values in parallel(tasks):
+            for left_index, right_index, value in pair_values:
+                store_pair_value(left_index, right_index, value)
+    elif len(codes) >= 2:
+        for left_index in range(len(columns)):
+            for right_index in range(left_index + 1, len(columns)):
+                value = normalized_mutual_info_score(
+                    code_values[:, left_index],
+                    code_values[:, right_index],
+                    average_method='arithmetic',
+                )
+                store_pair_value(left_index, right_index, value)
     return pd.DataFrame(matrix, columns=columns, index=columns)
 
 

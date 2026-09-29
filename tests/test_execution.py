@@ -1,14 +1,14 @@
 import math
 
 import pandas as pd
-
+import pytest
+import syntheval.syntheval as syntheval_module
 from syntheval.execution import build_metric_execution
 from syntheval.metrics.fairness.metric_equal_opportunity import EqualOpportunity
 from syntheval.metrics.fairness.metric_equalized_odds import EqualizedOdds
 from syntheval.metrics.fairness.metric_statistical_parity import StatisticalParity
 from syntheval.metrics.privacy.metric_AttrDis import AttributeDisclosure
 from syntheval.syntheval import SynthEval
-import syntheval.syntheval as syntheval_module
 from syntheval.utils.configuration import AnalysisConfig, _analysis_target_parser
 
 
@@ -300,3 +300,249 @@ def test_structured_evaluation_forwards_group_context_to_metric(monkeypatch):
     assert execution.preprocessing_metadata["fit_role"] == "train"
     assert execution.preprocessing_metadata["fingerprint"] == execution.preprocessing_fingerprint
     assert CaptureMetric.received_group_context == group_context
+
+
+def test_structured_evaluation_emits_safe_method_progress_for_success_failure_and_block(
+    monkeypatch,
+):
+    train = pd.DataFrame({"category": ["known", "known"]})
+
+    class CaptureMetric:
+        def __init__(self, **_kwargs):
+            pass
+
+        def evaluate(self, **_kwargs):
+            return {"ok": True}
+
+        def format_output(self):
+            return []
+
+        def normalize_output(self):
+            return [{"metric": "capture", "dim": "u", "val": 0.5, "n_val": 0.5}]
+
+        def normalize_output_v2(self):
+            return [{"metric": "capture", "dim": "u", "val": 0.5, "n_val": 0.5}]
+
+    class FailingMetric(CaptureMetric):
+        def evaluate(self, **_kwargs):
+            raise ValueError("secret category value")
+
+    class MustNotRun(CaptureMetric):
+        def __init__(self, **_kwargs):
+            raise AssertionError("blocked metric must not be constructed")
+
+    monkeypatch.setitem(syntheval_module.loaded_metrics, "capture", CaptureMetric)
+    monkeypatch.setitem(syntheval_module.loaded_metrics, "unexpected", FailingMetric)
+    monkeypatch.setitem(syntheval_module.loaded_metrics, "cls_acc", MustNotRun)
+    evaluator = SynthEval(
+        train,
+        holdout_dataframe=pd.DataFrame({"category": ["holdout-only"]}),
+        cat_cols=["category"],
+        verbose=False,
+        enable_plots=False,
+        console="off",
+    )
+    events = []
+
+    evaluator.evaluate(
+        train.copy(),
+        return_execution=True,
+        expected_output_manifest={
+            "capture": ("capture",),
+            "unexpected": ("unexpected",),
+            "cls_acc": ("cls_acc",),
+        },
+        progress_callback=events.append,
+        _dataset_name="model-a",
+        capture={},
+        unexpected={},
+        cls_acc={},
+    )
+
+    assert [(item["method"], item["event"]) for item in events] == [
+        ("capture", "started"),
+        ("capture", "completed"),
+        ("unexpected", "started"),
+        ("unexpected", "failure"),
+        ("cls_acc", "started"),
+        ("cls_acc", "failure"),
+    ]
+    assert [item["outcome"] for item in events if item["event"] != "started"] == [
+        "succeeded",
+        "failed",
+        "blocked",
+    ]
+    assert events[1]["duration_seconds"] >= 0
+    assert events[3]["failure_class"] == "ValueError"
+    assert events[5]["failure_class"] == "real_holdout_unknown_category"
+    assert "secret category value" not in str(events)
+    assert all(item["model_name"] == "model-a" for item in events)
+
+
+def test_structured_evaluation_callback_failure_is_telemetry_only(monkeypatch, caplog):
+    real = pd.DataFrame({"feature": [0.0, 1.0, 2.0, 3.0], "target": [0, 1, 0, 1]})
+
+    class CaptureMetric:
+        def __init__(self, **_kwargs):
+            pass
+
+        def evaluate(self, **_kwargs):
+            return {"ok": True}
+
+        def format_output(self):
+            return []
+
+        def normalize_output(self):
+            return [{"metric": "capture", "dim": "u", "val": 0.5, "n_val": 0.5}]
+
+        def normalize_output_v2(self):
+            return [{"metric": "capture", "dim": "u", "val": 0.5, "n_val": 0.5}]
+
+    monkeypatch.setitem(syntheval_module.loaded_metrics, "capture", CaptureMetric)
+    evaluator = SynthEval(
+        real,
+        cat_cols=["target"],
+        verbose=False,
+        enable_plots=False,
+        console="off",
+    )
+
+    def broken_callback(_event):
+        raise ValueError("sensitive callback detail")
+
+    with caplog.at_level("WARNING", logger=syntheval_module.__name__):
+        execution = evaluator.evaluate(
+            real.copy(),
+            return_execution=True,
+            expected_output_manifest={"capture": ("capture",)},
+            progress_callback=broken_callback,
+            capture={},
+        )
+
+    assert execution.execution_complete is True
+    assert execution.metric_executions[0].status.state == "succeeded"
+    assert caplog.text.count("progress callback failed") == 2
+    assert "exception_type=ValueError" in caplog.text
+    assert "sensitive callback detail" not in caplog.text
+
+
+def test_structured_evaluation_uses_nominal_unknown_only_for_supported_holdout_metrics(
+    monkeypatch,
+):
+    train = pd.DataFrame({"category": ["train-a", "train-b"]})
+    synthetic = pd.DataFrame({"category": ["train-a", "train-b"]})
+    holdout = pd.DataFrame({"category": ["holdout-only"]})
+
+    class CaptureMetric:
+        holdout_values = None
+
+        def __init__(self, **kwargs):
+            type(self).holdout_values = kwargs["hout_data"]["category"].tolist()
+
+        def evaluate(self, **kwargs):
+            return {"ok": True}
+
+        def format_output(self):
+            return []
+
+        def normalize_output(self):
+            return [
+                {
+                    "metric": "supported",
+                    "dim": "p",
+                    "val": 0.0,
+                    "err": 0.0,
+                    "n_val": 1.0,
+                    "n_err": 0.0,
+                }
+            ]
+
+        def normalize_output_v2(self):
+            return [
+                {
+                    "metric": "supported",
+                    "dim": "p",
+                    "val": 0.0,
+                    "err": 0.0,
+                    "n_val": 1.0,
+                    "n_err": 0.0,
+                }
+            ]
+
+    class MustNotRun:
+        def __init__(self, **kwargs):
+            raise AssertionError("unsupported metric must be blocked before construction")
+
+    monkeypatch.setitem(syntheval_module.loaded_metrics, "nndr", CaptureMetric)
+    monkeypatch.setitem(syntheval_module.loaded_metrics, "cls_acc", MustNotRun)
+    evaluator = SynthEval(
+        train,
+        holdout_dataframe=holdout,
+        cat_cols=["category"],
+        verbose=False,
+        enable_plots=False,
+        console="off",
+    )
+
+    execution = evaluator.evaluate(
+        synthetic,
+        return_execution=True,
+        expected_output_manifest={"nndr": ("supported",), "cls_acc": ("unsupported",)},
+        nndr={},
+        cls_acc={},
+    )
+
+    assert CaptureMetric.holdout_values == [-1]
+    assert execution.preprocessing_metadata["fit_role"] == "train"
+    assert execution.preprocessing_metadata["categories"] == [["'train-a'", "'train-b'"]]
+    assert execution.preprocessing_metadata["real_holdout_unknown_categories"] == {"category": 1}
+    assert execution.preprocessing_metadata["real_holdout_unknown_representation"] == -1
+    assert execution.preprocessing_metadata["real_holdout_unknown_nominal_metrics"] == [
+        "nndr"
+    ]
+    assert execution.preprocessing_metadata["real_holdout_unknown_blocked_metrics"] == [
+        "cls_acc"
+    ]
+    assert execution.metric_executions[0].status.state == "succeeded"
+    blocked = execution.metric_executions[1]
+    assert blocked.status.state == "blocked"
+    assert blocked.status.exception_type == "RealHoldoutUnknownCategoryError"
+    assert "real holdout" in blocked.status.exception_message.casefold()
+
+
+def test_structured_evaluation_still_rejects_unknown_synthetic_category():
+    train = pd.DataFrame({"category": ["train-a", "train-b"]})
+    synthetic = pd.DataFrame({"category": ["synthetic-only"]})
+    evaluator = SynthEval(
+        train,
+        holdout_dataframe=pd.DataFrame({"category": ["train-a"]}),
+        cat_cols=["category"],
+        verbose=False,
+        enable_plots=False,
+        console="off",
+    )
+
+    with pytest.raises(ValueError, match="Unknown categorical value.*role='evaluation'"):
+        evaluator.evaluate(
+            synthetic,
+            return_execution=True,
+            expected_output_manifest={"nndr": ("supported",)},
+            nndr={},
+        )
+
+
+def test_legacy_evaluation_blocks_unsupported_real_holdout_unknown_category():
+    train = pd.DataFrame({"category": ["train-a", "train-b"]})
+    evaluator = SynthEval(
+        train,
+        holdout_dataframe=pd.DataFrame({"category": ["holdout-only"]}),
+        cat_cols=["category"],
+        verbose=False,
+        enable_plots=False,
+        console="off",
+    )
+
+    with pytest.raises(
+        syntheval_module.RealHoldoutUnknownCategoryError, match="unsupported metrics"
+    ):
+        evaluator.evaluate(train.copy(), cls_acc={})

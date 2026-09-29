@@ -7,8 +7,7 @@ import json
 
 import numpy as np
 import pandas as pd
-
-from sklearn.preprocessing import OrdinalEncoder, MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, OrdinalEncoder
 
 
 class MixedSchemaPreprocessor:
@@ -122,7 +121,12 @@ class TrainFittedPreprocessor:
         self.encoder = None
         self.num_encoder = None
         if self.cat_cols:
-            self.encoder = OrdinalEncoder()
+            # -1 is reserved for explicitly permitted unseen evaluation values.
+            # Ordinary transforms remain strict, so synthetic support checks
+            # cannot accidentally accept a category absent from train.
+            self.encoder = OrdinalEncoder(
+                handle_unknown="use_encoded_value", unknown_value=-1
+            )
             self.encoder.fit(train_frame[self.cat_cols])
         if self.num_cols:
             self.num_encoder = MinMaxScaler()
@@ -150,6 +154,7 @@ class TrainFittedPreprocessor:
                 if self.encoder is not None
                 else None
             ),
+            "unknown_category_value": -1 if self.encoder is not None else None,
             "data_min": self.num_encoder.data_min_.tolist() if self.num_encoder is not None else None,
             "data_max": self.num_encoder.data_max_.tolist() if self.num_encoder is not None else None,
             "data_range": (
@@ -162,17 +167,23 @@ class TrainFittedPreprocessor:
             ),
         }
 
-    def transform(self, data, role="evaluation"):
+    def transform(self, data, role="evaluation", *, allow_unknown_categories=False):
         """Transform a frame without changing fitted encoder/scaler state."""
         data = data.copy()
         if self.encoder is not None:
             try:
-                data[self.cat_cols] = self.encoder.transform(data[self.cat_cols]).astype("int")
+                encoded_categories = self.encoder.transform(data[self.cat_cols])
             except (KeyError, ValueError) as exc:
                 raise ValueError(
                     f"Unknown or invalid categorical value while transforming role={role!r}; "
                     f"columns={self.cat_cols}: {exc}"
                 ) from exc
+            if not allow_unknown_categories and (encoded_categories == -1).any():
+                raise ValueError(
+                    f"Unknown categorical value while transforming role={role!r}; "
+                    f"columns={self.unknown_categorical_columns(data)}"
+                )
+            data[self.cat_cols] = encoded_categories.astype("int")
         if self.num_encoder is not None:
             try:
                 data[self.num_cols] = self.num_encoder.transform(data[self.num_cols])
@@ -183,9 +194,28 @@ class TrainFittedPreprocessor:
                 ) from exc
         return data
 
-    def encode(self, data, role="evaluation"):
+    def encode(self, data, role="evaluation", *, allow_unknown_categories=False):
         """Compatibility alias for :meth:`transform`."""
-        return self.transform(data, role=role)
+        return self.transform(
+            data, role=role, allow_unknown_categories=allow_unknown_categories
+        )
+
+    def unknown_categorical_columns(self, data):
+        """Return counts of categorical values outside train-fitted support."""
+        if self.encoder is None:
+            return {}
+        try:
+            encoded = self.encoder.transform(data[self.cat_cols])
+        except (KeyError, ValueError) as exc:
+            raise ValueError(
+                f"Unknown or invalid categorical value while inspecting evaluation data; "
+                f"columns={self.cat_cols}: {exc}"
+            ) from exc
+        return {
+            column: int((encoded[:, index] == -1).sum())
+            for index, column in enumerate(self.cat_cols)
+            if (encoded[:, index] == -1).any()
+        }
 
     def decode(self, data):
         """Decode a transformed frame using the fitted train vocabulary/range."""

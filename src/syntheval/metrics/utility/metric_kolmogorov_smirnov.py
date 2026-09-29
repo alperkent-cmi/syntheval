@@ -2,21 +2,45 @@
 # Author: Anton D. Lautrup
 # Date: 21-08-2023
 
+import os
+from collections import Counter
+
 import numpy as np
 import pandas as pd
-
+from joblib import Parallel, cpu_count, delayed
+from scipy.stats import ks_2samp, permutation_test
 from syntheval.metrics.core.metric import MetricClass
-
-from collections import Counter
-from scipy.stats import permutation_test, ks_2samp
-
 from syntheval.utils.plot_metrics import plot_significantly_dissimilar_variables
 
-# Below this many columns, per-column joblib dispatch overhead (process pool
-# startup for the 'loky' backend) outweighs the benefit -- keep small/doctest
-# inputs sequential. Matches the threshold used for corr_diff/mi_diff, which
-# have the same "independent per-column work" shape.
+# Avoid process startup for low-work KS inputs even when they are wide. The
+# estimate counts numeric sorting work and categorical permutation work.
 _PARALLEL_MIN_COLS = 50
+_PARALLEL_MIN_WORK = 1_250_000
+
+
+def _ks_v2_worker_count(column_count, sample_count, categorical_count, n_perms):
+    """Choose bounded workers only when estimated per-column work merits them.
+
+    ``sample_count`` is the combined real and synthetic row count. Numeric KS
+    work scales with sorting; categorical TVD permutation work scales with
+    both samples and the requested permutation count.
+    """
+    if column_count < _PARALLEL_MIN_COLS or column_count < 1:
+        return 1
+    sample_count = max(1, sample_count)
+    categorical_count = min(column_count, max(0, categorical_count))
+    numeric_count = column_count - categorical_count
+    sort_factor = int(np.ceil(np.log2(max(2, sample_count))))
+    estimated_work = sample_count * (
+        numeric_count * sort_factor + categorical_count * n_perms
+    )
+    if estimated_work < _PARALLEL_MIN_WORK:
+        return 1
+    available = cpu_count()
+    configured_limit = os.environ.get('LOKY_MAX_CPU_COUNT')
+    if configured_limit is not None:
+        available = min(available, int(configured_limit))
+    return min(max(1, available), column_count)
 
 
 def _is_missing_scalar(value):
@@ -122,6 +146,12 @@ def _evaluate_one_column(category, R, F, is_categorical, n_perms, random_state):
         test_name = 'ks_2samp'
     return category, is_categorical, float(statistic), float(pvalue), True, test_name
 
+
+def _evaluate_one_column_in_worker(*task):
+    """Return worker PID with result so process dispatch is auditable in tests."""
+    return os.getpid(), _evaluate_one_column(*task)
+
+
 class KolmogorovSmirnovTest(MetricClass):
     """The Metric Class is an abstract class that interfaces with 
     SynthEval. When initialised the class has the following attributes:
@@ -191,9 +221,21 @@ class KolmogorovSmirnovTest(MetricClass):
             for index, category in enumerate(columns)
         ]
 
-        if len(columns) >= _PARALLEL_MIN_COLS:
-            from joblib import Parallel, delayed
-            results = Parallel(n_jobs=-2, backend='loky')(delayed(_evaluate_one_column)(*task) for task in tasks)
+        workers = _ks_v2_worker_count(
+            len(columns),
+            len(self.real_data) + len(self.synt_data),
+            len(cat_col_set.intersection(columns)),
+            n_perms,
+        )
+        if workers > 1:
+            worker_results = Parallel(
+                n_jobs=workers,
+                backend='loky',
+                return_as='generator',
+                batch_size=1,
+                pre_dispatch=workers,
+            )(delayed(_evaluate_one_column_in_worker)(*task) for task in tasks)
+            results = (result for _worker_pid, result in worker_results)
         else:
             results = [_evaluate_one_column(*task) for task in tasks]
 

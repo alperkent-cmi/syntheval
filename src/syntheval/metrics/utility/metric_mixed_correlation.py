@@ -2,19 +2,28 @@
 # Author: Anton D. Lautrup
 # Date: 23-08-2023
 
+import logging
+import os
+
 import numpy as np
 import pandas as pd
 
-from joblib import Parallel, delayed
+from joblib import Parallel, cpu_count, delayed
 
 from syntheval.metrics.core.metric import MetricClass
 
 from scipy.stats import chi2_contingency
 from syntheval.utils.plot_metrics import plot_matrix_heatmap
 
+logger = logging.getLogger(__name__)
+
 #: Below this column count, the row-parallel path isn't worth the loky
 #: process-pool overhead (~0.1-0.5s) -- e.g. small doctest-sized inputs.
 _PARALLEL_MIN_COLS = 50
+
+# Avoid pool overhead on small v2 matrices while parallelizing wide datasets.
+_V2_PARALLEL_MIN_PAIRS = 32
+_V2_MAX_CHUNK_PAIRS = 512
 
 def _cramers_V_legacy(var1,var2) :
     """function for calculating Cramers V between two categorial variables
@@ -207,6 +216,81 @@ def _spearman_v2(left, right):
     return float(np.clip(value, -1.0, 1.0)) if np.isfinite(value) else np.nan
 
 
+def _v2_worker_count(pair_count):
+    """Choose a worker count bounded by joblib and the per-model CPU budget."""
+    if pair_count < _V2_PARALLEL_MIN_PAIRS:
+        return 1
+    available = cpu_count()
+    configured_limit = os.environ.get('LOKY_MAX_CPU_COUNT')
+    if configured_limit is not None:
+        available = min(available, int(configured_limit))
+    return min(max(1, available), pair_count)
+
+
+def _v2_pair_chunks(label_count, chunk_size):
+    """Yield bounded upper-triangle coordinate chunks in matrix order."""
+    chunk = []
+    for left_index in range(label_count):
+        for right_index in range(left_index + 1, label_count):
+            chunk.append((left_index, right_index))
+            if len(chunk) == chunk_size:
+                yield chunk
+                chunk = []
+    if chunk:
+        yield chunk
+
+
+def _v2_batches(items, batch_size):
+    """Yield bounded batches without retaining the full task sequence."""
+    batch = []
+    for item in items:
+        batch.append(item)
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def _mixed_correlation_pair_v2(data, labels, left_index, right_index,
+                               numerical_set, categorical_set):
+    """Compute one v2 pair and retain its matrix coordinates."""
+    left_label = labels[left_index]
+    right_label = labels[right_index]
+    try:
+        if left_label in numerical_set and right_label in numerical_set:
+            value = _spearman_v2(data[left_label], data[right_label])
+        elif left_label in categorical_set and right_label in categorical_set:
+            value = _cramers_V_v2(data[left_label], data[right_label])
+        elif left_label in categorical_set:
+            value = _correlation_ratio_v2(data[left_label], data[right_label])
+        else:
+            value = _correlation_ratio_v2(data[right_label], data[left_label])
+    except Exception as exc:
+        logger.exception(
+            "Failed to compute v2 mixed-correlation pair (%r, %r)",
+            left_label,
+            right_label,
+        )
+        raise RuntimeError(
+            f"Failed to compute v2 mixed-correlation pair "
+            f"({left_label!r}, {right_label!r})"
+        ) from exc
+    return left_index, right_index, value
+
+
+def _mixed_correlation_chunk_v2(data, labels, pairs,
+                                numerical_set, categorical_set):
+    """Compute one bounded pair chunk in a loky worker process."""
+    values = [
+        _mixed_correlation_pair_v2(
+            data, labels, left_index, right_index, numerical_set, categorical_set
+        )
+        for left_index, right_index in pairs
+    ]
+    return os.getpid(), values
+
+
 def mixed_correlation_v2(data, num_cols, cat_cols):
     """Return a Spearman/eta/Cramer's-V matrix and its valid-pair mask."""
     numerical = list(num_cols or [])
@@ -219,22 +303,48 @@ def mixed_correlation_v2(data, num_cols, cat_cols):
 
     numerical_set = set(numerical)
     categorical_set = set(categorical)
-    for left_index, left_label in enumerate(labels):
-        for right_index in range(left_index + 1, len(labels)):
-            right_label = labels[right_index]
-            if left_label in numerical_set and right_label in numerical_set:
-                value = _spearman_v2(data[left_label], data[right_label])
-            elif left_label in categorical_set and right_label in categorical_set:
-                value = _cramers_V_v2(data[left_label], data[right_label])
-            elif left_label in categorical_set:
-                value = _correlation_ratio_v2(data[left_label], data[right_label])
-            else:
-                value = _correlation_ratio_v2(data[right_label], data[left_label])
-            if np.isfinite(value):
-                matrix[left_index, right_index] = value
-                matrix[right_index, left_index] = value
-                valid[left_index, right_index] = True
-                valid[right_index, left_index] = True
+    pair_count = len(labels) * (len(labels) - 1) // 2
+    workers = _v2_worker_count(pair_count)
+
+    def store_pair_value(left_index, right_index, value):
+        if np.isfinite(value):
+            matrix[left_index, right_index] = value
+            matrix[right_index, left_index] = value
+            valid[left_index, right_index] = True
+            valid[right_index, left_index] = True
+
+    if workers > 1:
+        chunk_size = max(1, (pair_count + workers * 4 - 1) // (workers * 4))
+        chunk_size = min(chunk_size, _V2_MAX_CHUNK_PAIRS)
+        parallel = Parallel(
+            n_jobs=workers,
+            backend='loky',
+            return_as='generator',
+            batch_size=1,
+            pre_dispatch=workers,
+        )
+        chunks = _v2_pair_chunks(len(labels), chunk_size)
+        for chunk_batch in _v2_batches(chunks, workers):
+            tasks = []
+            for pairs in chunk_batch:
+                pair_labels = list(dict.fromkeys(
+                    labels[index] for pair in pairs for index in pair
+                ))
+                pair_data = data[pair_labels]
+                tasks.append(delayed(_mixed_correlation_chunk_v2)(
+                    pair_data, labels, pairs, numerical_set, categorical_set
+                ))
+            for _worker_pid, pair_values in parallel(tasks):
+                for left_index, right_index, value in pair_values:
+                    store_pair_value(left_index, right_index, value)
+    else:
+        for left_index in range(len(labels)):
+            for right_index in range(left_index + 1, len(labels)):
+                left, right, value = _mixed_correlation_pair_v2(
+                    data, labels, left_index, right_index,
+                    numerical_set, categorical_set,
+                )
+                store_pair_value(left, right, value)
     return pd.DataFrame(matrix, columns=labels, index=labels), pd.DataFrame(
         valid, columns=labels, index=labels
     )
