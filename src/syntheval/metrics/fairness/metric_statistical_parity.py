@@ -109,10 +109,10 @@ class StatisticalParity(MetricClass):
             
             target_vars = [
                 key for (key, value) in self.analysis_target.target_types.items() 
-                if isinstance(value, int) and value == 2
+                if isinstance(value, int) and value >= 2
                 ]
             
-            assert target_vars != [], "SynthEval(stat parity): metric did not run, no categorical target variables with exactly 2 unique values!"
+            assert target_vars != [], "SynthEval(stat parity): metric did not run, no categorical target variables with at least 2 unique values!"
             
             protected_attributes = [var for var in self.analysis_target.protected_vars if self.real_data[var].nunique() == 2]
             assert protected_attributes != [], "SynthEval(stat parity): metric did not run, no protected variables with exactly 2 unique values!"
@@ -123,6 +123,7 @@ class StatisticalParity(MetricClass):
 
         self.full_output = full_output
         result_rows = []
+        multiclass_rows = []
         for target_var, protected_attribute in product(target_vars, protected_attributes):
             # Drop confounder variables for the current target variable (if any)
             confounders = self.analysis_target.confounder_vars[target_var]
@@ -130,11 +131,70 @@ class StatisticalParity(MetricClass):
 
             fake_x, fake_y = synt_data.drop([target_var], axis=1), synt_data[target_var]
 
+            if self.analysis_target.target_types[target_var] > 2:
+                expected_classes = list(pd.unique(self.real_data[target_var]))
+                synthetic_classes = list(pd.unique(fake_y))
+                missing_classes = [value for value in expected_classes if value not in synthetic_classes]
+                unexpected_classes = [value for value in synthetic_classes if value not in expected_classes]
+                if missing_classes or unexpected_classes:
+                    raise ValueError(
+                        f"SynthEval(stat parity): target '{target_var}' class mismatch in "
+                        f"synthetic data; missing classes {missing_classes!r}, unexpected "
+                        f"classes {unexpected_classes!r}."
+                    )
+
+                fold_values = {value: [] for value in expected_classes}
+                for train_idxs, test_idxs in KFold(folds).split(fake_x, fake_y):
+                    X_train, X_test = fake_x.iloc[train_idxs], fake_x.iloc[test_idxs]
+                    y_train = fake_y.iloc[train_idxs]
+                    absent_train_classes = [
+                        value for value in expected_classes if not (y_train == value).any()
+                    ]
+                    if absent_train_classes:
+                        raise ValueError(
+                            f"SynthEval(stat parity): target '{target_var}' fold training data "
+                            f"is missing classes {absent_train_classes!r}."
+                        )
+
+                    clf = RandomForestClassifier(n_estimators=100)
+                    clf.fit(X_train, y_train)
+                    preds = clf.predict(X_test)
+                    groups = np.asarray(X_test[protected_attribute])
+                    if not np.any(groups == 0) or not np.any(groups == 1):
+                        raise ValueError(
+                            f"SynthEval(stat parity): target '{target_var}' fold lacks "
+                            f"required protected-group support for '{protected_attribute}'."
+                        )
+
+                    for class_value in expected_classes:
+                        class_prediction = np.asarray(preds) == class_value
+                        group_0 = class_prediction[groups == 0]
+                        group_1 = class_prediction[groups == 1]
+                        fold_values[class_value].append(float(group_1.mean() - group_0.mean()))
+
+                target_name = target_var.replace(' ', '_').lower()
+                for class_value in expected_classes:
+                    values = np.asarray(fold_values[class_value], dtype=float)
+                    multiclass_rows.append(
+                        {
+                            "target_var": target_name,
+                            "protected_attribute": protected_attribute,
+                            "target_class": class_value,
+                            "statistical_parity": float(np.mean(values)),
+                            "statistical_parity_se": (
+                                float(np.std(values, ddof=1) / np.sqrt(values.size))
+                                if values.size > 1
+                                else 0.0
+                            ),
+                        }
+                    )
+                continue
+
             # Train a classifier for each fold
             statistical_paraty_differences = []
             for train_idxs, test_idxs in KFold(folds).split(fake_x, fake_y):
                 X_train, X_test = fake_x.iloc[train_idxs], fake_x.iloc[test_idxs]
-                y_train, y_test = fake_y.iloc[train_idxs], fake_y.iloc[test_idxs]
+                y_train = fake_y.iloc[train_idxs]
 
                 # Train a classifier
                 clf = RandomForestClassifier(n_estimators=100)
@@ -155,15 +215,37 @@ class StatisticalParity(MetricClass):
 
         columns = ["target_var", "protected_attribute", "statistical_parity", "statistical_parity_se"]
         
-        self.results["statistical_parity"] = float(np.mean([row["statistical_parity"] for row in result_rows]))
-        self.results["statistical_parity_se"] = float(np.sqrt(np.sum([row["statistical_parity_se"]**2 for row in result_rows])) / len(result_rows))
-        self.results['raw results'] = pd.DataFrame.from_records(result_rows, columns=columns)
+        if result_rows:
+            self.results["statistical_parity"] = float(np.mean([row["statistical_parity"] for row in result_rows]))
+            self.results["statistical_parity_se"] = float(np.sqrt(np.sum([row["statistical_parity_se"]**2 for row in result_rows])) / len(result_rows))
+        if multiclass_rows:
+            self.results["statistical_parity_macro_ovr_v1"] = float(
+                np.mean([row["statistical_parity"] for row in multiclass_rows])
+            )
+            self.results["statistical_parity_macro_ovr_v1_se"] = float(
+                np.sqrt(np.sum([row["statistical_parity_se"] ** 2 for row in multiclass_rows]))
+                / len(multiclass_rows)
+            )
+        self.results['raw results'] = pd.DataFrame.from_records(
+            result_rows + multiclass_rows,
+            columns=columns + ["target_class"],
+        )
         return self.results
 
     def format_output(self) -> list:
         """ Return a list of tuples for printing results to the rich console."""
-        rows = ('fairness', "Statistical Parity difference", self.results["statistical_parity"], self.results["statistical_parity_se"])
-        return [rows]
+        rows = []
+        if "statistical_parity" in self.results:
+            rows.append((
+                'fairness', "Statistical Parity difference", self.results["statistical_parity"], self.results["statistical_parity_se"]
+            ))
+        if "statistical_parity_macro_ovr_v1" in self.results:
+            rows.append((
+                'fairness', "Statistical Parity macro OvR difference",
+                self.results["statistical_parity_macro_ovr_v1"],
+                self.results["statistical_parity_macro_ovr_v1_se"],
+            ))
+        return rows
 
     def normalize_output(self) -> list:
         """This function is for making a dictionary of the most quintessential
@@ -175,16 +257,40 @@ class StatisticalParity(MetricClass):
             name2  p  0.0  0.0    0.0    0.0
         """
         if self.results != {}:
-            output = [{
+            output = []
+            if "statistical_parity" in self.results:
+                output.append({
                     "metric": "statistical_parity",
                     "dim": "f",
                     "val": self.results["statistical_parity"],
                     "err": self.results["statistical_parity_se"],
                     "n_val": 1 - abs(self.results["statistical_parity"]),
                     "n_err": self.results["statistical_parity_se"],
-                }]
+                })
+            if "statistical_parity_macro_ovr_v1" in self.results:
+                value = self.results["statistical_parity_macro_ovr_v1"]
+                error = self.results["statistical_parity_macro_ovr_v1_se"]
+                output.append({
+                    "metric": "statistical_parity_macro_ovr_v1",
+                    "dim": "f",
+                    "val": value,
+                    "err": error,
+                    "n_val": 1 - abs(value),
+                    "n_err": error,
+                })
             if self.full_output:
-                for idx, row in self.results['raw results'].iterrows():
+                for _, row in self.results['raw results'].iterrows():
+                    if pd.notna(row.get("target_class")):
+                        class_name = str(row["target_class"]).replace(" ", "_").lower()
+                        output.append({
+                            "metric": f"sp_ovr_v1_{row['target_var']}_{class_name}_{row['protected_attribute']}",
+                            "dim": "f",
+                            "val": row["statistical_parity"],
+                            "err": row["statistical_parity_se"],
+                            "n_val": 1 - abs(row["statistical_parity"]),
+                            "n_err": row["statistical_parity_se"],
+                        })
+                        continue
                     output.append({
                         "metric": "sp_" + row["target_var"] + "_" + row["protected_attribute"],
                         "dim": "f",

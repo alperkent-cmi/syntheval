@@ -42,11 +42,127 @@ def _validate_binary_support(target_var, real_data, synt_data, hout_data):
     return real_support
 
 
+def _validate_multiclass_support(target_var, real_data, synt_data, hout_data):
+    real_support = _binary_support(real_data[target_var])
+    synt_support = _binary_support(synt_data[target_var])
+    hout_support = _binary_support(hout_data[target_var])
+    if len(real_support) < 3:
+        raise ValueError(
+            f"SynthEval(auroc): target {target_var!r} needs at least three real-training classes; "
+            f"observed {real_support!r}."
+        )
+    if len(synt_support) != len(real_support) or set(synt_support) != set(real_support):
+        raise ValueError(
+            f"SynthEval(auroc): target {target_var!r} has incompatible synthetic class "
+            f"support {synt_support!r}; expected {real_support!r}."
+        )
+    if len(hout_support) != len(real_support) or set(hout_support) != set(real_support):
+        raise ValueError(
+            f"SynthEval(auroc): target {target_var!r} has incompatible holdout class "
+            f"support {hout_support!r}; expected {real_support!r}."
+        )
+    return real_support
+
+
 def _sem(values):
     values = np.asarray(values, dtype=float)
     if values.size < 2:
         return np.nan
     return float(np.std(values, ddof=1) / np.sqrt(values.size))
+
+
+def _sem_or_none(values):
+    """Return SEM when estimable, otherwise retain missing uncertainty as None."""
+    return None if len(values) < 2 else _sem(values)
+
+
+def _new_auc_classifier(model):
+    if model == 'rf_cls':
+        return RandomForestClassifier(random_state=42)
+    if model == 'log_reg':
+        return LogisticRegression(random_state=42, max_iter=100)
+    raise ValueError(f"Unrecognised AUROC model {model!r}.")
+
+
+def _multiclass_ovr_result(
+    target_var, support, model, num_boots, real_x, real_y, fake_x, fake_y, hout_x, hout_y
+):
+    per_class = {label: {'real_auc': [], 'synthetic_auc': [], 'differences': []} for label in support}
+    bootstrap_differences = []
+    for bootstrap in range(num_boots):
+        if num_boots != 1:
+            real_x_sub, real_y_sub = resample(
+                real_x, real_y, n_samples=len(real_x), stratify=real_y,
+                random_state=bootstrap,
+            )
+            fake_x_sub, fake_y_sub = resample(
+                fake_x, fake_y, n_samples=len(fake_x), stratify=fake_y,
+                random_state=bootstrap,
+            )
+        else:
+            real_x_sub, real_y_sub = real_x, real_y
+            fake_x_sub, fake_y_sub = fake_x, fake_y
+
+        real_model = _new_auc_classifier(model)
+        synthetic_model = _new_auc_classifier(model)
+        real_model.fit(real_x_sub, real_y_sub)
+        synthetic_model.fit(fake_x_sub, fake_y_sub)
+        bootstrap_class_differences = []
+        for label in support:
+            if label not in real_model.classes_ or label not in synthetic_model.classes_:
+                raise ValueError(
+                    f"SynthEval(auroc): target {target_var!r} class {label!r} is absent "
+                    f"from bootstrap {bootstrap} training support."
+                )
+            real_index = int(np.flatnonzero(real_model.classes_ == label)[0])
+            synthetic_index = int(np.flatnonzero(synthetic_model.classes_ == label)[0])
+            real_auc = float(
+                roc_auc_score(
+                    (hout_y == label).astype(int),
+                    real_model.predict_proba(hout_x)[:, real_index],
+                )
+            )
+            synthetic_auc = float(
+                roc_auc_score(
+                    (hout_y == label).astype(int),
+                    synthetic_model.predict_proba(hout_x)[:, synthetic_index],
+                )
+            )
+            difference = synthetic_auc - real_auc
+            per_class[label]['real_auc'].append(real_auc)
+            per_class[label]['synthetic_auc'].append(synthetic_auc)
+            per_class[label]['differences'].append(difference)
+            bootstrap_class_differences.append(difference)
+        bootstrap_differences.append(float(np.mean(bootstrap_class_differences)))
+
+    class_results = []
+    for class_index, label in enumerate(support):
+        values = per_class[label]
+        difference = float(np.mean(values['differences']))
+        class_label = label.item() if isinstance(label, np.generic) else label
+        class_results.append({
+            'class_index': class_index,
+            'class_label': class_label,
+            'real_auc': float(np.mean(values['real_auc'])),
+            'synthetic_auc': float(np.mean(values['synthetic_auc'])),
+            'difference': difference,
+            'difference_err': _sem_or_none(values['differences']),
+            'bootstrap_real_auc': tuple(values['real_auc']),
+            'bootstrap_synthetic_auc': tuple(values['synthetic_auc']),
+            'bootstrap_differences': tuple(values['differences']),
+        })
+
+    macro_difference = float(np.mean(bootstrap_differences))
+    return {
+        'target_var': target_var,
+        'aggregation': 'macro_one_vs_rest',
+        'metric_version': 'macro_ovr_v3',
+        'classes': tuple(class_results),
+        'bootstrap_differences': tuple(bootstrap_differences),
+        'difference': macro_difference,
+        'difference_err': _sem_or_none(bootstrap_differences),
+        'agreement': auroc_agreement_v2(macro_difference),
+    }
 
 
 def auroc_agreement_v2(signed_difference):
@@ -109,11 +225,11 @@ class PredictionAUROCDifference(MetricClass):
             assert self.analysis_target is not None, "SynthEval(auroc): metric did not run, no analysis target variable(s) supplied!"
 
             target_vars = [
-                key for (key, value) in self.analysis_target.target_types.items() 
-                if isinstance(value, Integral) and value == 2
-                ]
+                key for (key, value) in self.analysis_target.target_types.items()
+                if isinstance(value, Integral) and value >= 2
+            ]
             
-            assert target_vars != [], "SynthEval(auroc): metric did not run, no categorical target variables with exactly 2 unique values!"
+            assert target_vars != [], "SynthEval(auroc): metric did not run, no categorical target variables with at least 2 unique values!"
             assert self.hout_data is not None, "SynthEval(auroc): metric did not run, no holdout data supplied!"
             assert model in ['rf_cls', 'log_reg'], "SynthEval(auroc): metric did not run, unrecognised model name supplied! Use 'rf_cls' or 'log_reg'."
             if not isinstance(num_boots, Integral) or num_boots < 1:
@@ -123,10 +239,17 @@ class PredictionAUROCDifference(MetricClass):
         else:
             self.full_output = full_output
             result_rows = []
+            multiclass_results = {}
             for target_var in target_vars:
-                support = _validate_binary_support(
-                    target_var, self.real_data, self.synt_data, self.hout_data
-                )
+                class_count = self.analysis_target.target_types[target_var]
+                if class_count == 2:
+                    support = _validate_binary_support(
+                        target_var, self.real_data, self.synt_data, self.hout_data
+                    )
+                else:
+                    support = _validate_multiclass_support(
+                        target_var, self.real_data, self.synt_data, self.hout_data
+                    )
                 # Drop confounder variables for the current target variable (if any)
                 confounders = self.analysis_target.confounder_vars[target_var]
                 real_data = self.real_data.drop(confounders, axis=1)
@@ -137,6 +260,22 @@ class PredictionAUROCDifference(MetricClass):
                 fake_x, fake_y = synt_data.drop([target_var], axis=1), synt_data[target_var]
                 hout_x, hout_y = hout_data.drop([target_var], axis=1), hout_data[target_var]
                 target_name = target_var.replace(' ', '_').lower()
+                if len(support) > 2:
+                    multiclass_result = _multiclass_ovr_result(
+                        target_var, support, model, num_boots,
+                        real_x, real_y, fake_x, fake_y, hout_x, hout_y,
+                    )
+                    multiclass_results[target_name] = multiclass_result
+                    result_rows.append({
+                        'target_var': target_name,
+                        'model': model,
+                        'auroc_diff': multiclass_result['difference'],
+                        'auroc_diff_v2': multiclass_result['difference'],
+                        'auroc_diff_err_v2': multiclass_result['difference_err'],
+                        'auroc_agreement_v2': multiclass_result['agreement'],
+                    })
+                    continue
+
                 hout_y_binary = (hout_y == support[1]).astype(int)
 
                 match model:
@@ -228,7 +367,21 @@ class PredictionAUROCDifference(MetricClass):
             self.results['auroc_diff_v2'] = float(self.results['auroc results']['auroc_diff_v2'].mean())
             self.results['auroc_diff_err_v2'] = _sem(self.results['auroc results']['auroc_diff_v2'])
             self.results['auroc_agreement_v2'] = auroc_agreement_v2(self.results['auroc_diff_v2'])
-            self.results['auroc_version_v2'] = 'signed_synthetic_minus_real'
+            if not multiclass_results:
+                self.results['auroc_version_v2'] = 'signed_synthetic_minus_real'
+            else:
+                self.results['auroc_class_results_v3'] = multiclass_results
+                self.results['auroc_diff_macro_ovr_v3'] = float(
+                    np.mean([item['difference'] for item in multiclass_results.values()])
+                )
+                self.results['auroc_diff_err_macro_ovr_v3'] = (
+                    _sem([item['difference'] for item in multiclass_results.values()])
+                    if len(multiclass_results) > 1 else None
+                )
+                self.results['auroc_agreement_macro_ovr_v3'] = auroc_agreement_v2(
+                    self.results['auroc_diff_macro_ovr_v3']
+                )
+                self.results['auroc_version_v3'] = 'macro_one_vs_rest_synthetic_minus_real'
             # self.results = {'model': model, 'auroc_diff': float(roc_auc_mean_fake - roc_auc_mean_real)}
             return self.results
         
@@ -266,6 +419,101 @@ class PredictionAUROCDifference(MetricClass):
         """Return the versioned signed-difference and agreement identities."""
         if self.results == {}:
             return []
+        if 'auroc_class_results_v3' in self.results:
+            rows = [{
+                'metric': 'auroc_macro_ovr_v3',
+                'dim': 'u',
+                'val': self.results['auroc_diff_macro_ovr_v3'],
+                'err': self.results.get('auroc_diff_err_macro_ovr_v3'),
+                'n_val': self.results['auroc_agreement_macro_ovr_v3'],
+                'n_err': self.results.get('auroc_diff_err_macro_ovr_v3'),
+                'metric_version': 'macro_ovr_v3',
+                'raw_value': self.results['auroc_diff_macro_ovr_v3'],
+                'normalized_value': self.results['auroc_agreement_macro_ovr_v3'],
+                'metadata': {
+                    'difference': 'synthetic_minus_real',
+                    'aggregation': 'macro_one_vs_rest',
+                    'class_results': self.results['auroc_class_results_v3'],
+                },
+            }]
+            for target_name, target_result in self.results['auroc_class_results_v3'].items():
+                rows.append({
+                    'metric': f'auroc_{target_name}_macro_ovr_v3',
+                    'dim': 'u',
+                    'val': target_result['difference'],
+                    'err': target_result['difference_err'],
+                    'n_val': target_result['agreement'],
+                    'n_err': target_result['difference_err'],
+                    'metric_version': 'macro_ovr_v3',
+                    'raw_value': target_result['difference'],
+                    'normalized_value': target_result['agreement'],
+                    'metadata': {
+                        'target_var': target_name,
+                        'aggregation': target_result['aggregation'],
+                        'class_results': target_result['classes'],
+                    },
+                })
+                for class_result in target_result['classes']:
+                    rows.append({
+                        'metric': (
+                            f"auroc_{target_name}_class_{class_result['class_index']}_ovr_v3"
+                        ),
+                        'dim': 'u',
+                        'val': class_result['difference'],
+                        'err': class_result['difference_err'],
+                        'n_val': auroc_agreement_v2(class_result['difference']),
+                        'n_err': class_result['difference_err'],
+                        'metric_version': 'macro_ovr_v3',
+                        'raw_value': class_result['difference'],
+                        'normalized_value': auroc_agreement_v2(class_result['difference']),
+                        'metadata': {
+                            'target_var': target_name,
+                            'class_index': class_result['class_index'],
+                            'class_label': class_result['class_label'],
+                            'real_auc': class_result['real_auc'],
+                            'synthetic_auc': class_result['synthetic_auc'],
+                            'bootstrap_differences': class_result['bootstrap_differences'],
+                        },
+                    })
+            binary_rows = self.results['auroc results'].loc[
+                ~self.results['auroc results']['target_var'].isin(
+                    self.results['auroc_class_results_v3']
+                )
+            ]
+            if not binary_rows.empty:
+                binary_differences = binary_rows['auroc_diff_v2'].to_numpy(dtype=float)
+                binary_difference = float(np.mean(binary_differences))
+                binary_agreement = auroc_agreement_v2(binary_difference)
+                rows.append({
+                    'metric': 'auroc_v2',
+                    'dim': 'u',
+                    'val': binary_difference,
+                    'err': _sem(binary_differences),
+                    'n_val': binary_agreement,
+                    'n_err': _sem(binary_differences),
+                    'metric_version': 'v2',
+                    'raw_value': binary_difference,
+                    'normalized_value': binary_agreement,
+                    'metadata': {
+                        'difference': 'synthetic_minus_real',
+                        'agreement': '1-abs(difference)',
+                    },
+                })
+                if self.full_output:
+                    for _, row in binary_rows.iterrows():
+                        rows.append({
+                            'metric': f"auroc_{row['target_var']}_v2",
+                            'dim': 'u',
+                            'val': float(row['auroc_diff_v2']),
+                            'err': row['auroc_diff_err_v2'],
+                            'n_val': float(row['auroc_agreement_v2']),
+                            'n_err': row['auroc_diff_err_v2'],
+                            'metric_version': 'v2',
+                            'raw_value': float(row['auroc_diff_v2']),
+                            'normalized_value': float(row['auroc_agreement_v2']),
+                            'metadata': {'target_var': row['target_var']},
+                        })
+            return rows
         rows = [{
             'metric': 'auroc_v2',
             'dim': 'u',

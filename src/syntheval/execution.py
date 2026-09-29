@@ -15,9 +15,13 @@ TERMINAL_STATES = frozenset(
 _OPTIONAL_DIAGNOSTIC_PREFIXES = {
     "auroc": ("auroc_",),
     "auroc_v2": ("auroc_",),
+    "auroc_macro_ovr_v3": ("auroc_",),
     "statistical_parity": ("sp_",),
     "equalized_odds": ("eqo_",),
     "equal_opportunity": ("eo_",),
+    "statistical_parity_macro_ovr_v1": ("sp_ovr_v1_",),
+    "equalized_odds_macro_ovr_v1": ("eqo_ovr_v1_",),
+    "equal_opportunity_macro_ovr_v1": ("eo_ovr_v1_",),
 }
 
 

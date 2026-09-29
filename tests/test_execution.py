@@ -1,3 +1,4 @@
+import importlib
 import math
 
 import pandas as pd
@@ -10,6 +11,29 @@ from syntheval.metrics.fairness.metric_statistical_parity import StatisticalPari
 from syntheval.metrics.privacy.metric_AttrDis import AttributeDisclosure
 from syntheval.syntheval import SynthEval
 from syntheval.utils.configuration import AnalysisConfig, _analysis_target_parser
+
+
+def _multiclass_fairness_data():
+    rows = [
+        (0, 0, 0),
+        (0, 1, 1),
+        (1, 0, 0),
+        (1, 1, 1),
+        (2, 0, 2),
+        (2, 1, 0),
+    ] * 2
+    return pd.DataFrame(rows, columns=["target", "group", "prediction"])
+
+
+class _PredictionFeatureClassifier:
+    def __init__(self, **kwargs):
+        pass
+
+    def fit(self, X, y):
+        return self
+
+    def predict(self, X):
+        return X["prediction"].to_numpy()
 
 
 def test_analysis_config_keeps_sensitive_and_protected_roles_separate():
@@ -163,6 +187,113 @@ def test_equalized_odds_uses_protected_role_not_disclosure_role():
     ).evaluate(folds=2)
 
     assert result["raw results"]["protected_attribute"].tolist() == ["group"]
+
+
+@pytest.mark.parametrize(
+    ("metric_class", "result_key", "per_class_values", "macro_value"),
+    [
+        (
+            StatisticalParity,
+            "statistical_parity",
+            [-1 / 3, 2 / 3, -1 / 3],
+            0.0,
+        ),
+        (
+            EqualizedOdds,
+            "equalized_odds",
+            [0.5, 0.75, 0.5],
+            7 / 12,
+        ),
+        (
+            EqualOpportunity,
+            "equal_opportunity",
+            [-1.0, 1.0, -1.0],
+            -1 / 3,
+        ),
+    ],
+)
+def test_multiclass_fairness_metrics_report_ovr_classes_and_versioned_macro(
+    monkeypatch, metric_class, result_key, per_class_values, macro_value
+):
+    module = importlib.import_module(metric_class.__module__)
+    monkeypatch.setattr(module, "RandomForestClassifier", _PredictionFeatureClassifier)
+    data = _multiclass_fairness_data()
+    config = AnalysisConfig(data, "target", protected_vars=["group"])
+    metric = metric_class(
+        data, data.copy(), analysis_target=config, do_preprocessing=False
+    )
+
+    result = metric.evaluate(folds=2, full_output=True)
+    raw_results = result["raw results"].sort_values("target_class")
+    macro_key = f"{result_key}_macro_ovr_v1"
+
+    assert raw_results["target_class"].tolist() == [0, 1, 2]
+    assert raw_results[result_key].tolist() == pytest.approx(per_class_values)
+    assert result[macro_key] == pytest.approx(macro_value)
+    normalized = metric.normalize_output()
+    assert normalized[0]["metric"] == macro_key
+    assert len(normalized) == 4
+    assert all("ovr_v1" in row["metric"] for row in normalized[1:])
+
+    if metric_class is EqualizedOdds:
+        assert raw_results["tpr_difference"].tolist() == pytest.approx(
+            [-1.0, 1.0, -1.0]
+        )
+        assert raw_results["fpr_difference"].tolist() == pytest.approx(
+            [0.0, 0.5, 0.0]
+        )
+
+
+@pytest.mark.parametrize(
+    "metric_class", [StatisticalParity, EqualizedOdds, EqualOpportunity]
+)
+@pytest.mark.parametrize("failure", ["missing_class", "missing_group"])
+def test_multiclass_fairness_fails_on_missing_class_or_group_support(
+    monkeypatch, metric_class, failure
+):
+    module = importlib.import_module(metric_class.__module__)
+    monkeypatch.setattr(module, "RandomForestClassifier", _PredictionFeatureClassifier)
+    real = _multiclass_fairness_data()
+    synthetic = real.copy()
+    if failure == "missing_class":
+        synthetic = synthetic.loc[synthetic["target"] != 2].reset_index(drop=True)
+    else:
+        synthetic["group"] = 0
+    config = AnalysisConfig(real, "target", protected_vars=["group"])
+    metric = metric_class(
+        real, synthetic, analysis_target=config, do_preprocessing=False
+    )
+
+    message = "missing classes" if failure == "missing_class" else "support"
+    with pytest.raises(ValueError, match=message):
+        metric.evaluate(folds=2)
+
+
+@pytest.mark.parametrize(
+    ("metric_class", "result_key"),
+    [
+        (StatisticalParity, "statistical_parity"),
+        (EqualizedOdds, "equalized_odds"),
+        (EqualOpportunity, "equal_opportunity"),
+    ],
+)
+def test_binary_fairness_metric_keeps_legacy_identity(
+    monkeypatch, metric_class, result_key
+):
+    module = importlib.import_module(metric_class.__module__)
+    monkeypatch.setattr(module, "RandomForestClassifier", _PredictionFeatureClassifier)
+    data = _multiclass_fairness_data()
+    data = data.loc[data["target"] != 2].reset_index(drop=True)
+    config = AnalysisConfig(data, "target", protected_vars=["group"])
+    metric = metric_class(
+        data, data.copy(), analysis_target=config, do_preprocessing=False
+    )
+
+    result = metric.evaluate(folds=2, full_output=True)
+
+    assert result_key in result
+    assert f"{result_key}_macro_ovr_v1" not in result
+    assert metric.normalize_output()[0]["metric"] == result_key
 
 
 def test_metric_execution_accounts_for_missing_duplicate_and_unexpected_keys():

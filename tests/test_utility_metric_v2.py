@@ -3,6 +3,8 @@ import os
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.metrics import roc_auc_score
+from syntheval.execution import build_metric_execution
 from syntheval.metrics.utility import (
     metric_kolmogorov_smirnov,
     metric_mixed_correlation,
@@ -63,7 +65,109 @@ def test_auroc_v2_is_signed_and_zero_difference_is_perfect_agreement():
     result = metric.evaluate(model='log_reg')
     assert np.isclose(result['auroc_diff_v2'], 0.0)
     assert result['auroc_agreement_v2'] == 1.0
+    assert result['auroc_version_v2'] == 'signed_synthetic_minus_real'
     assert metric.normalize_output_v2()[0]['n_val'] == 1.0
+    assert metric.normalize_output_v2()[0]['metric'] == 'auroc_v2'
+
+
+def test_auroc_multiclass_uses_macro_ovr_and_retains_classwise_evidence(monkeypatch):
+    real_probabilities = np.array([
+        [0.8, 0.1, 0.1], [0.6, 0.3, 0.1], [0.2, 0.7, 0.1],
+        [0.3, 0.6, 0.1], [0.1, 0.2, 0.7], [0.2, 0.1, 0.7],
+    ])
+    synthetic_probabilities = np.array([
+        [0.6, 0.2, 0.2], [0.4, 0.5, 0.1], [0.3, 0.6, 0.1],
+        [0.2, 0.5, 0.3], [0.3, 0.2, 0.5], [0.1, 0.4, 0.5],
+    ])
+
+    class FixedProbabilityClassifier:
+        def __init__(self, **kwargs):
+            pass
+
+        def fit(self, features, labels):
+            self.classes_ = np.unique(labels)
+            self.probabilities = (
+                real_probabilities if len(features) == 9 else synthetic_probabilities
+            )
+            return self
+
+        def predict_proba(self, features):
+            return self.probabilities[features['row'].to_numpy(dtype=int)]
+
+    monkeypatch.setattr(
+        'syntheval.metrics.utility.metric_auroc_difference.LogisticRegression',
+        FixedProbabilityClassifier,
+    )
+    real = pd.DataFrame({'row': range(9), 'label': ['a', 'b', 'c'] * 3})
+    synt = pd.DataFrame({'row': range(12), 'label': ['a', 'b', 'c'] * 4})
+    hout = pd.DataFrame({'row': range(6), 'label': ['a', 'a', 'b', 'b', 'c', 'c']})
+    metric = PredictionAUROCDifference(
+        real,
+        synt,
+        hout,
+        cat_cols=['label'],
+        num_cols=['row'],
+        analysis_target='label',
+        do_preprocessing=False,
+        verbose=False,
+        plot_figures=False,
+    )
+
+    result = metric.evaluate(model='log_reg')
+    classes = ['a', 'b', 'c']
+    expected_class_differences = [
+        roc_auc_score(
+            (hout['label'] == label).astype(int), synthetic_probabilities[:, index]
+        )
+        - roc_auc_score(
+            (hout['label'] == label).astype(int), real_probabilities[:, index]
+        )
+        for index, label in enumerate(classes)
+    ]
+    evidence = result['auroc_class_results_v3']['label']
+    assert evidence['aggregation'] == 'macro_one_vs_rest'
+    assert evidence['metric_version'] == 'macro_ovr_v3'
+    assert [record['class_label'] for record in evidence['classes']] == classes
+    np.testing.assert_allclose(
+        [record['difference'] for record in evidence['classes']],
+        expected_class_differences,
+    )
+    expected_macro = float(np.mean(expected_class_differences))
+    assert np.isclose(result['auroc_diff_macro_ovr_v3'], expected_macro)
+    assert result['auroc_version_v3'] == 'macro_one_vs_rest_synthetic_minus_real'
+
+    normalized = metric.normalize_output_v2()
+    assert normalized[0]['metric'] == 'auroc_macro_ovr_v3'
+    assert normalized[0]['metric_version'] == 'macro_ovr_v3'
+    class_rows = [row for row in normalized if '_class_' in row['metric']]
+    assert len(class_rows) == 3
+    execution = build_metric_execution(
+        'auroc_diff',
+        (),
+        ('auroc_macro_ovr_v3',),
+        status_key_result=normalized,
+        normalized_rows_v2=normalized,
+    )
+    assert execution.status.succeeded
+
+
+def test_auroc_multiclass_rejects_missing_class_support():
+    real = pd.DataFrame({'x': range(9), 'label': ['a', 'b', 'c'] * 3})
+    synt = pd.DataFrame({'x': range(9), 'label': ['a', 'b', 'a'] * 3})
+    hout = pd.DataFrame({'x': range(6), 'label': ['a', 'a', 'b', 'b', 'c', 'c']})
+    metric = PredictionAUROCDifference(
+        real,
+        synt,
+        hout,
+        cat_cols=['label'],
+        num_cols=['x'],
+        analysis_target='label',
+        do_preprocessing=False,
+        verbose=False,
+        plot_figures=False,
+    )
+    with pytest.raises(ValueError, match='incompatible synthetic class support'):
+        metric.evaluate(model='log_reg')
 
 
 def test_classification_v2_uses_macro_default_and_paired_folds_without_equalizing_sizes():
