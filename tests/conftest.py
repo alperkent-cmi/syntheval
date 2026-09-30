@@ -16,7 +16,7 @@ def _selected_repository_root() -> Path:
     synthdata_roots = [
         candidate.resolve()
         for candidate in candidates
-        if (candidate.resolve() / "AGENTS.md").is_file()
+        if (candidate.resolve() / "synthdata" / "__init__.py").is_file()
         and (candidate.resolve() / "pyproject.toml").is_file()
     ]
     if synthdata_roots:
