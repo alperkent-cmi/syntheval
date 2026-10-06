@@ -634,6 +634,9 @@ def test_structured_evaluation_uses_nominal_unknown_only_for_supported_holdout_m
     assert execution.preprocessing_metadata["real_holdout_unknown_blocked_metrics"] == [
         "cls_acc"
     ]
+    assert execution.preprocessing_metadata["real_holdout_unknown_policy"] == "blocked"
+    assert execution.preprocessing_metadata["real_holdout_unknown_remapped_metrics"] == []
+    assert execution.preprocessing_metadata["real_holdout_unknown_row_fraction"] == 1.0
     assert execution.metric_executions[0].status.state == "succeeded"
     blocked = execution.metric_executions[1]
     assert blocked.status.state == "blocked"
@@ -677,3 +680,169 @@ def test_legacy_evaluation_blocks_unsupported_real_holdout_unknown_category():
         syntheval_module.RealHoldoutUnknownCategoryError, match="unsupported metrics"
     ):
         evaluator.evaluate(train.copy(), cls_acc={})
+
+
+def _holdout_capture_metric(store, key):
+    class CaptureMetric:
+        def __init__(self, **kwargs):
+            store[key] = kwargs["hout_data"]["category"].tolist()
+
+        def evaluate(self, **kwargs):
+            return {"ok": True}
+
+        def format_output(self):
+            return []
+
+        def normalize_output(self):
+            return [{"metric": key, "dim": "u", "val": 0.5, "n_val": 0.5}]
+
+        def normalize_output_v2(self):
+            return [{"metric": key, "dim": "u", "val": 0.5, "n_val": 0.5}]
+
+    return CaptureMetric
+
+
+def _rare_unknown_frames():
+    # train-b is the mode; one of 40 holdout rows (2.5%) carries an unseen value.
+    train = pd.DataFrame({"category": ["train-a"] * 3 + ["train-b"] * 5})
+    holdout = pd.DataFrame({"category": ["train-a"] * 20 + ["train-b"] * 19 + ["holdout-only"]})
+    return train, holdout
+
+
+def test_structured_evaluation_remaps_rare_holdout_unknown_to_train_mode(monkeypatch):
+    train, holdout = _rare_unknown_frames()
+    seen = {}
+    monkeypatch.setitem(
+        syntheval_module.loaded_metrics, "nndr", _holdout_capture_metric(seen, "nndr")
+    )
+    monkeypatch.setitem(
+        syntheval_module.loaded_metrics, "cls_acc", _holdout_capture_metric(seen, "cls_acc")
+    )
+    evaluator = SynthEval(
+        train,
+        holdout_dataframe=holdout,
+        cat_cols=["category"],
+        verbose=False,
+        enable_plots=False,
+        console="off",
+    )
+
+    execution = evaluator.evaluate(
+        train.copy(),
+        return_execution=True,
+        expected_output_manifest={"nndr": ("nndr",), "cls_acc": ("cls_acc",)},
+        nndr={},
+        cls_acc={},
+    )
+
+    assert [item.status.state for item in execution.metric_executions] == [
+        "succeeded",
+        "succeeded",
+    ]
+    # Gower metrics keep the nominal unknown code; classifier metrics get the train mode.
+    assert seen["nndr"][-1] == -1
+    assert seen["cls_acc"][-1] == 1
+    assert -1 not in seen["cls_acc"]
+    metadata = execution.preprocessing_metadata
+    assert metadata["real_holdout_unknown_categories"] == {"category": 1}
+    assert metadata["real_holdout_unknown_row_count"] == 1
+    assert metadata["real_holdout_unknown_row_fraction"] == pytest.approx(1 / 40)
+    assert metadata["real_holdout_unknown_policy"] == "train_mode"
+    assert metadata["real_holdout_unknown_nominal_metrics"] == ["nndr"]
+    assert metadata["real_holdout_unknown_remapped_metrics"] == ["cls_acc"]
+    assert metadata["real_holdout_unknown_blocked_metrics"] == []
+    assert metadata["unknown_fallback_codes"] == [1]
+    assert "holdout-only" not in str(metadata)
+
+
+def test_structured_evaluation_blocks_holdout_unknown_above_row_fraction_cap(monkeypatch):
+    train, holdout = _rare_unknown_frames()
+
+    class MustNotRun:
+        def __init__(self, **kwargs):
+            raise AssertionError("blocked metric must not be constructed")
+
+    monkeypatch.setitem(syntheval_module.loaded_metrics, "cls_acc", MustNotRun)
+    evaluator = SynthEval(
+        train,
+        holdout_dataframe=holdout,
+        cat_cols=["category"],
+        verbose=False,
+        enable_plots=False,
+        console="off",
+        max_holdout_unknown_row_fraction=0.0,
+    )
+
+    execution = evaluator.evaluate(
+        train.copy(),
+        return_execution=True,
+        expected_output_manifest={"cls_acc": ("cls_acc",)},
+        cls_acc={},
+    )
+
+    blocked = execution.metric_executions[0]
+    assert blocked.status.state == "blocked"
+    assert blocked.status.exception_type == "RealHoldoutUnknownCategoryError"
+    assert execution.preprocessing_metadata["real_holdout_unknown_policy"] == "blocked"
+    assert execution.preprocessing_metadata["real_holdout_unknown_blocked_metrics"] == [
+        "cls_acc"
+    ]
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.5, True, "0.05"])
+def test_invalid_holdout_unknown_row_fraction_is_rejected(value):
+    with pytest.raises(ValueError, match="max_holdout_unknown_row_fraction"):
+        SynthEval(
+            pd.DataFrame({"category": ["a", "b"]}),
+            cat_cols=["category"],
+            verbose=False,
+            enable_plots=False,
+            console="off",
+            max_holdout_unknown_row_fraction=value,
+        )
+
+
+def test_legacy_evaluation_remaps_rare_holdout_unknown(monkeypatch):
+    train, holdout = _rare_unknown_frames()
+    seen = {}
+    monkeypatch.setitem(
+        syntheval_module.loaded_metrics, "cls_acc", _holdout_capture_metric(seen, "cls_acc")
+    )
+    evaluator = SynthEval(
+        train,
+        holdout_dataframe=holdout,
+        cat_cols=["category"],
+        verbose=False,
+        enable_plots=False,
+        console="off",
+    )
+
+    evaluator.evaluate(train.copy(), cls_acc={})
+
+    assert seen["cls_acc"][-1] == 1
+
+
+def test_train_mode_policy_uses_train_state_only():
+    from syntheval.utils.preprocessing import TrainFittedPreprocessor
+
+    train = pd.DataFrame(
+        {"category": ["a", "b", "b", "c"], "constant": ["neg"] * 4, "x": [0.0, 1.0, 2.0, 3.0]}
+    )
+    holdout = pd.DataFrame(
+        {"category": ["new", "a"], "constant": ["pos", "neg"], "x": [1.0, 2.0]}
+    )
+    preprocessor = TrainFittedPreprocessor.fit(train, ["category", "constant"], ["x"])
+    refit = TrainFittedPreprocessor.fit(train, ["category", "constant"], ["x"])
+
+    encoded = preprocessor.encode(holdout, role="real_holdout", unknown_policy="train_mode")
+
+    assert encoded["category"].tolist() == [1, 0]
+    # A column constant in train resolves to its only level.
+    assert encoded["constant"].tolist() == [0, 0]
+    assert preprocessor.unknown_row_count(holdout) == 1
+    assert preprocessor.fingerprint == refit.fingerprint
+    with pytest.raises(ValueError, match="Unknown categorical value"):
+        preprocessor.encode(holdout, role="real_holdout")
+    with pytest.raises(ValueError, match="unknown_policy"):
+        preprocessor.encode(holdout, unknown_policy="drop")
+

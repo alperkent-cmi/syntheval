@@ -60,6 +60,91 @@ def _supports_nominal_unknown_holdout(method, nn_distance):
     )
 
 
+def _uses_train_mode_holdout(method, nn_distance):
+    """Holdout-sensitive metrics whose encodings cannot represent ``-1``."""
+    return method in _HOLDOUT_SENSITIVE_METRICS and not _supports_nominal_unknown_holdout(
+        method, nn_distance
+    )
+
+
+def _validate_unknown_row_fraction(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("max_holdout_unknown_row_fraction must be a number in [0, 1]")
+    value = float(value)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError("max_holdout_unknown_row_fraction must be a number in [0, 1]")
+    return value
+
+
+class _HoldoutUnknownPlan:
+    """Train-fitted resolution of real holdout categories absent from train.
+
+    Holdout values outside the train vocabulary are mapped to the column's
+    train mode for metrics whose integer encodings cannot represent an
+    unknown level. Gower metrics keep the nominal ``-1`` code. When the share
+    of affected holdout rows exceeds ``max_row_fraction`` the shift is treated
+    as material and those metrics stay blocked instead of being remapped.
+    """
+
+    def __init__(self, preprocessor, hold_out, max_row_fraction):
+        self.columns = (
+            preprocessor.unknown_categorical_columns(hold_out) if hold_out is not None else {}
+        )
+        self.row_count = (
+            preprocessor.unknown_row_count(hold_out) if self.columns else 0
+        )
+        n_rows = len(hold_out) if hold_out is not None else 0
+        self.row_fraction = self.row_count / n_rows if n_rows else 0.0
+        self.max_row_fraction = max_row_fraction
+        self.remap_allowed = bool(self.columns) and self.row_fraction <= max_row_fraction
+        self.train_mode_hout = (
+            preprocessor.encode(hold_out, role="real_holdout", unknown_policy="train_mode")
+            if self.remap_allowed
+            else None
+        )
+
+    def blocks(self, method, nn_distance):
+        return (
+            bool(self.columns)
+            and not self.remap_allowed
+            and _uses_train_mode_holdout(method, nn_distance)
+        )
+
+    def worker_args(self, worker_args, method, nn_distance):
+        if self.train_mode_hout is None or not _uses_train_mode_holdout(method, nn_distance):
+            return worker_args
+        return {**worker_args, "hout_data": self.train_mode_hout}
+
+    def metadata(self, methods, nn_distance):
+        if not self.columns:
+            return {}
+        nominal = sorted(
+            method for method in methods if _supports_nominal_unknown_holdout(method, nn_distance)
+        )
+        train_mode = sorted(
+            method for method in methods if _uses_train_mode_holdout(method, nn_distance)
+        )
+        return {
+            "real_holdout_unknown_categories": dict(self.columns),
+            "real_holdout_unknown_representation": -1,
+            "real_holdout_unknown_row_count": self.row_count,
+            "real_holdout_unknown_row_fraction": self.row_fraction,
+            "real_holdout_unknown_max_row_fraction": self.max_row_fraction,
+            "real_holdout_unknown_policy": "train_mode" if self.remap_allowed else "blocked",
+            "real_holdout_unknown_nominal_metrics": nominal,
+            "real_holdout_unknown_remapped_metrics": train_mode if self.remap_allowed else [],
+            "real_holdout_unknown_blocked_metrics": [] if self.remap_allowed else train_mode,
+        }
+
+    def error(self, detail):
+        return RealHoldoutUnknownCategoryError(
+            "Real holdout contains categorical values absent from train; "
+            f"{detail}, columns={sorted(self.columns)}, "
+            f"row_fraction={self.row_fraction:.4f} exceeds "
+            f"max_holdout_unknown_row_fraction={self.max_row_fraction}"
+        )
+
+
 def _safe_progress_exception_type(error):
     """Return exception class name only when it is a safe identifier."""
     if error is None:
@@ -268,7 +353,8 @@ class SynthEval():
                  enable_plots: bool = True,
                  console: Literal['rich', 'ascii', 'off'] = 'rich',
                  timeout: int = None,
-                 show_warnings: bool = True
+                 show_warnings: bool = True,
+                 max_holdout_unknown_row_fraction: float = 0.05,
         ) -> None:
         """Primary object for accessing the SynthEval evaluation framework. Create with the real data used for training 
         and use either evaluate of benchmark methods for evaluating synthetic datasets.
@@ -285,6 +371,9 @@ class SynthEval():
             console             : type of console output to use ('rich', 'ascii', 'off').
             timeout             : time in seconds after which a metric evaluation will be interrupted and skipped. Default is None (no timeout).
             show_warnings       : flag for displaying warnings from metrics in the console. Default is True.
+            max_holdout_unknown_row_fraction : largest share of holdout rows with categories absent from train
+                                  that is resolved by mapping to the train mode for classifier-based holdout
+                                  metrics; above it those metrics are blocked. 0 always blocks. Default is 0.05.
         """
         self.verbose = verbose
         self.enable_plots = enable_plots
@@ -297,6 +386,9 @@ class SynthEval():
         else:
             self.console = console
         self.timeout = timeout
+        self.max_holdout_unknown_row_fraction = _validate_unknown_row_fraction(
+            max_holdout_unknown_row_fraction
+        )
 
         if holdout_dataframe is not None:
             # Make sure columns and their order are the same.
@@ -382,16 +474,14 @@ class SynthEval():
         )
         real_data = CLE.encode(self.real)
         synt_data = CLE.encode(self.synt)
-        holdout_unknown_categories = (
-            CLE.unknown_categorical_columns(self.hold_out)
-            if self.hold_out is not None
-            else {}
+        holdout_plan = _HoldoutUnknownPlan(
+            CLE, self.hold_out, self.max_holdout_unknown_row_fraction
         )
         hout_data = (
             CLE.encode(
                 self.hold_out,
                 role="real_holdout",
-                allow_unknown_categories=True,
+                unknown_policy="nominal",
             )
             if self.hold_out is not None
             else None
@@ -448,16 +538,8 @@ class SynthEval():
                 )
                 continue
 
-            allows_nominal_unknown = _supports_nominal_unknown_holdout(method, self.nn_dist)
-            if (
-                holdout_unknown_categories
-                and method in _HOLDOUT_SENSITIVE_METRICS
-                and not allows_nominal_unknown
-            ):
-                error = RealHoldoutUnknownCategoryError(
-                    "Real holdout contains categorical values absent from train; "
-                    f"metric={method}, columns={sorted(holdout_unknown_categories)}"
-                )
+            if holdout_plan.blocks(method, self.nn_dist):
+                error = holdout_plan.error(f"metric={method}")
                 blocked = build_metric_execution(
                     method,
                     None,
@@ -496,7 +578,7 @@ class SynthEval():
                     _run_metric_with_timeout(
                         loaded_metrics[method],
                         evaluation_config[method],
-                        worker_args,
+                        holdout_plan.worker_args(worker_args, method, self.nn_dist),
                         self.timeout,
                         include_v2=True,
                     )
@@ -542,26 +624,7 @@ class SynthEval():
         self._raw_results = raw_results
         execution_complete = all(item.status.execution_complete for item in executions)
         preprocessing_metadata = CLE.metadata()
-        if holdout_unknown_categories:
-            nominal_unknown_methods = sorted(
-                method
-                for method in methods
-                if _supports_nominal_unknown_holdout(method, self.nn_dist)
-            )
-            blocked_unknown_methods = sorted(
-                method
-                for method in methods
-                if method in _HOLDOUT_SENSITIVE_METRICS
-                and method not in nominal_unknown_methods
-            )
-            preprocessing_metadata.update(
-                {
-                    "real_holdout_unknown_categories": holdout_unknown_categories,
-                    "real_holdout_unknown_representation": -1,
-                    "real_holdout_unknown_nominal_metrics": nominal_unknown_methods,
-                    "real_holdout_unknown_blocked_metrics": blocked_unknown_methods,
-                }
-            )
+        preprocessing_metadata.update(holdout_plan.metadata(methods, self.nn_dist))
         result = SynthEvalExecution(
             pass_id=pass_id,
             target_view=target_view,
@@ -661,29 +724,19 @@ class SynthEval():
         )
         real_data = CLE.encode(self.real)
         synt_data = CLE.encode(self.synt)
-        holdout_unknown_categories = (
-            CLE.unknown_categorical_columns(self.hold_out)
-            if self.hold_out is not None
-            else {}
+        holdout_plan = _HoldoutUnknownPlan(
+            CLE, self.hold_out, self.max_holdout_unknown_row_fraction
         )
-        if holdout_unknown_categories:
-            unsupported_methods = sorted(
-                method
-                for method in evaluation_config
-                if method in _HOLDOUT_SENSITIVE_METRICS
-                and not _supports_nominal_unknown_holdout(method, self.nn_dist)
-            )
-            if unsupported_methods:
-                raise RealHoldoutUnknownCategoryError(
-                    "Real holdout contains categorical values absent from train; "
-                    f"unsupported metrics={unsupported_methods}, "
-                    f"columns={sorted(holdout_unknown_categories)}"
-                )
+        unsupported_methods = sorted(
+            method for method in evaluation_config if holdout_plan.blocks(method, self.nn_dist)
+        )
+        if unsupported_methods:
+            raise holdout_plan.error(f"unsupported metrics={unsupported_methods}")
         hout_data = (
             CLE.encode(
                 self.hold_out,
                 role="real_holdout",
-                allow_unknown_categories=bool(holdout_unknown_categories),
+                unknown_policy="nominal" if holdout_plan.columns else "strict",
             )
             if self.hold_out is not None
             else None
@@ -727,7 +780,10 @@ class SynthEval():
                     try:
                         raw, formatted_output, key_result, error, warnings_list = _run_coroutine_sync(
                             _run_metric_with_timeout(
-                                loaded_metrics[method], evaluation_config[method], worker_args, self.timeout
+                                loaded_metrics[method],
+                                evaluation_config[method],
+                                holdout_plan.worker_args(worker_args, method, self.nn_dist),
+                                self.timeout
                             )
                         )
                         if error is not None:
@@ -767,7 +823,10 @@ class SynthEval():
                 try:                    
                     raw, formatted_output, key_result, error, warnings_list = _run_coroutine_sync(
                             _run_metric_with_timeout(
-                                loaded_metrics[method], evaluation_config[method], worker_args, self.timeout
+                                loaded_metrics[method],
+                                evaluation_config[method],
+                                holdout_plan.worker_args(worker_args, method, self.nn_dist),
+                                self.timeout
                             )
                         )
                     if error is not None:
@@ -819,7 +878,10 @@ class SynthEval():
                 try:
                     raw, formatted_output, key_result, error, warnings_list = _run_coroutine_sync(
                             _run_metric_with_timeout(
-                                loaded_metrics[method], evaluation_config[method], worker_args, self.timeout
+                                loaded_metrics[method],
+                                evaluation_config[method],
+                                holdout_plan.worker_args(worker_args, method, self.nn_dist),
+                                self.timeout
                             )
                         )
                     if error is not None:

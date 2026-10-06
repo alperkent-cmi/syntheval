@@ -9,6 +9,9 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler, OrdinalEncoder
 
+#: Policies for categorical evaluation values absent from the train vocabulary.
+UNKNOWN_CATEGORY_POLICIES = ("strict", "nominal", "train_mode")
+
 
 class MixedSchemaPreprocessor:
     """Train-fitted state for role-aware mixed-schema distances.
@@ -128,6 +131,16 @@ class TrainFittedPreprocessor:
                 handle_unknown="use_encoded_value", unknown_value=-1
             )
             self.encoder.fit(train_frame[self.cat_cols])
+            # Train mode per column, used to resolve unseen evaluation values
+            # under the "train_mode" policy. Ties break on the lowest code so
+            # the fitted state is deterministic.
+            train_codes = self.encoder.transform(train_frame[self.cat_cols]).astype("int")
+            self.fallback_codes = [
+                int(np.bincount(train_codes[:, index]).argmax())
+                for index in range(len(self.cat_cols))
+            ]
+        else:
+            self.fallback_codes = []
         if self.num_cols:
             self.num_encoder = MinMaxScaler()
             self.num_encoder.fit(train_frame[self.num_cols])
@@ -155,6 +168,7 @@ class TrainFittedPreprocessor:
                 else None
             ),
             "unknown_category_value": -1 if self.encoder is not None else None,
+            "unknown_fallback_codes": list(self.fallback_codes),
             "data_min": self.num_encoder.data_min_.tolist() if self.num_encoder is not None else None,
             "data_max": self.num_encoder.data_max_.tolist() if self.num_encoder is not None else None,
             "data_range": (
@@ -167,8 +181,25 @@ class TrainFittedPreprocessor:
             ),
         }
 
-    def transform(self, data, role="evaluation", *, allow_unknown_categories=False):
-        """Transform a frame without changing fitted encoder/scaler state."""
+    def transform(
+        self,
+        data,
+        role="evaluation",
+        *,
+        allow_unknown_categories=False,
+        unknown_policy=None,
+    ):
+        """Transform a frame without changing fitted encoder/scaler state.
+
+        ``unknown_policy`` controls categorical values absent from train:
+        ``"strict"`` raises, ``"nominal"`` keeps the reserved ``-1`` code and
+        ``"train_mode"`` replaces it with the column's train-fitted mode.
+        ``allow_unknown_categories=True`` is an alias for ``"nominal"``.
+        """
+        if unknown_policy is None:
+            unknown_policy = "nominal" if allow_unknown_categories else "strict"
+        if unknown_policy not in UNKNOWN_CATEGORY_POLICIES:
+            raise ValueError(f"Unsupported unknown_policy={unknown_policy!r}")
         data = data.copy()
         if self.encoder is not None:
             try:
@@ -178,10 +209,15 @@ class TrainFittedPreprocessor:
                     f"Unknown or invalid categorical value while transforming role={role!r}; "
                     f"columns={self.cat_cols}: {exc}"
                 ) from exc
-            if not allow_unknown_categories and (encoded_categories == -1).any():
+            if unknown_policy == "strict" and (encoded_categories == -1).any():
                 raise ValueError(
                     f"Unknown categorical value while transforming role={role!r}; "
                     f"columns={self.unknown_categorical_columns(data)}"
+                )
+            if unknown_policy == "train_mode":
+                fallback = np.asarray(self.fallback_codes, dtype=encoded_categories.dtype)
+                encoded_categories = np.where(
+                    encoded_categories == -1, fallback[np.newaxis, :], encoded_categories
                 )
             data[self.cat_cols] = encoded_categories.astype("int")
         if self.num_encoder is not None:
@@ -194,11 +230,34 @@ class TrainFittedPreprocessor:
                 ) from exc
         return data
 
-    def encode(self, data, role="evaluation", *, allow_unknown_categories=False):
+    def encode(
+        self,
+        data,
+        role="evaluation",
+        *,
+        allow_unknown_categories=False,
+        unknown_policy=None,
+    ):
         """Compatibility alias for :meth:`transform`."""
         return self.transform(
-            data, role=role, allow_unknown_categories=allow_unknown_categories
+            data,
+            role=role,
+            allow_unknown_categories=allow_unknown_categories,
+            unknown_policy=unknown_policy,
         )
+
+    def unknown_row_count(self, data):
+        """Return the number of rows with any categorical value outside train support."""
+        if self.encoder is None:
+            return 0
+        try:
+            encoded = self.encoder.transform(data[self.cat_cols])
+        except (KeyError, ValueError) as exc:
+            raise ValueError(
+                f"Unknown or invalid categorical value while inspecting evaluation data; "
+                f"columns={self.cat_cols}: {exc}"
+            ) from exc
+        return int((encoded == -1).any(axis=1).sum())
 
     def unknown_categorical_columns(self, data):
         """Return counts of categorical values outside train-fitted support."""
