@@ -116,6 +116,6 @@ def _analysis_target_parser(real_data, analysis_target, analysis_target_var = No
             analysis_target.target_types = config_dict['target_types']
 
         except (AssertionError, FileNotFoundError):
+            # Parsing has no file side effects; call AnalysisConfig.save() to persist.
             analysis_target = AnalysisConfig(dataset=real_data, target_vars=analysis_target, confounder_vars=[], sensitive_vars=[])
-            analysis_target.save()
     return analysis_target

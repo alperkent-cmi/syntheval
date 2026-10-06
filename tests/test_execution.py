@@ -846,3 +846,12 @@ def test_train_mode_policy_uses_train_state_only():
     with pytest.raises(ValueError, match="unknown_policy"):
         preprocessor.encode(holdout, unknown_policy="drop")
 
+
+def test_column_name_analysis_target_does_not_write_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    real = pd.DataFrame({"feature": [0.0, 1.0, 2.0, 3.0], "label": [0, 1, 0, 1]})
+
+    config = _analysis_target_parser(real, "label")
+
+    assert config.target_vars == ["label"]
+    assert list(tmp_path.iterdir()) == []
