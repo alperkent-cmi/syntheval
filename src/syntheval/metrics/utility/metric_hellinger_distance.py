@@ -7,8 +7,13 @@ import numpy as np
 from syntheval.metrics.core.metric import MetricClass
 
 def _scott_ref_rule(set1,set2):
-    """Function for doing the Scott reference rule to calcualte number of bins needed to 
-    represent the nummerical values.
+    """Shared histogram bin edges for real and synthetic numeric values, by
+    Scott's reference rule (bin width 3.5 * std * n^(-1/3), Scott 1979) over
+    the pooled range.
+
+    Upstream computed the width as n^(1/3) * std / (3.5 * IQR), rounded up to
+    an integer, which gives a single bin on [0, 1]-scaled data, so the
+    Hellinger distance of every numeric column was exactly 0.
     
     Args:
         set1 (array-like): Real data
@@ -19,23 +24,16 @@ def _scott_ref_rule(set1,set2):
     
     Example:
         >>> _scott_ref_rule([1,2,3,4,5],[1,2,3,4,5])
-        array([1., 2., 3., 4., 5.])
+        array([1., 3., 5.])
     """
-    samples = np.concatenate((set1, set2))
-    std = np.std(samples)
-    n = len(samples)
-    if np.percentile(samples, 75) - np.percentile(samples, 25) == 0:
-        bins = np.percentile(samples, [0, 10, 25, 75, 90, 100])
-        bins = np.unique(bins)
-        if len(bins) < 2:
-            bins = np.unique(samples)
-        return bins
-    else:
-        bin_width = np.ceil(n**(1/3) * std / (3.5 * (np.percentile(samples, 75) - np.percentile(samples, 25)))).astype(int)
-        min_edge = min(samples); max_edge = max(samples)
-        N = min(abs(int((max_edge-min_edge)/bin_width)),10000)
-        bins = np.linspace(min_edge, max_edge, N + 1)
-        return bins
+    samples = np.concatenate((np.asarray(set1, dtype=float), np.asarray(set2, dtype=float)))
+    samples = samples[np.isfinite(samples)]
+    if samples.min() == samples.max():
+        return np.array([samples.min() - 0.5, samples.max() + 0.5])
+    edges = np.histogram_bin_edges(samples, bins='scott')
+    if len(edges) > 10001:
+        edges = np.linspace(samples.min(), samples.max(), 10001)
+    return edges
 
 def _hellinger(p,q):
     """Hellinger distance between distributions
@@ -83,10 +81,11 @@ class HellingerDistance(MetricClass):
         H_dist = []
     
         for category in self.cat_cols:
-            class_num = len(np.unique(self.real_data[category]))
-
-            pdfR = np.histogram(self.real_data[category], bins=class_num)[0]
-            pdfF = np.histogram(self.synt_data[category], bins=class_num)[0]
+            # Count each category in both tables over one shared category set;
+            # separate np.histogram calls binned each table over its own range.
+            levels = np.union1d(np.unique(self.real_data[category]), np.unique(self.synt_data[category]))
+            pdfR = self.real_data[category].value_counts().reindex(levels, fill_value=0).to_numpy()
+            pdfF = self.synt_data[category].value_counts().reindex(levels, fill_value=0).to_numpy()
             H_dist.append(_hellinger(pdfR/sum(pdfR),pdfF/sum(pdfF)))
         
         for category in self.num_cols:
