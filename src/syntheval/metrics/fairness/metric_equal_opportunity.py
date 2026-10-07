@@ -206,7 +206,9 @@ class EqualOpportunity(MetricClass):
             "equal_opportunity_se",
         ]
 
-        row_values = [row["equal_opportunity"] for row in result_rows]
+        # Average the size of each (target, attribute) gap, as fairlearn's
+        # difference metrics do: signed gaps of opposite sign would cancel.
+        row_values = [abs(row["equal_opportunity"]) for row in result_rows]
         row_errors = [row["equal_opportunity_se"] for row in result_rows]
         self.results["equal_opportunity"] = float(np.nanmean(row_values))
         self.results["equal_opportunity_se"] = float(

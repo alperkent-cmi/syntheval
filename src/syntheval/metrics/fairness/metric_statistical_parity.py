@@ -155,7 +155,9 @@ class StatisticalParity(MetricClass):
 
         columns = ["target_var", "protected_attribute", "statistical_parity", "statistical_parity_se"]
         
-        self.results["statistical_parity"] = float(np.mean([row["statistical_parity"] for row in result_rows]))
+        # Average the size of each (target, attribute) gap, as fairlearn's
+        # demographic_parity_difference does: signed gaps of opposite sign would cancel.
+        self.results["statistical_parity"] = float(np.mean([abs(row["statistical_parity"]) for row in result_rows]))
         self.results["statistical_parity_se"] = float(np.sqrt(np.sum([row["statistical_parity_se"]**2 for row in result_rows])) / len(result_rows))
         self.results['raw results'] = pd.DataFrame.from_records(result_rows, columns=columns)
         return self.results
