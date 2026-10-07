@@ -174,11 +174,15 @@ class NearestNeighbourAdversarialAccuracy(MetricClass):
             name2  p  0.0  0.0    0.0    0.0 
         """
         if self.results != {}:
+            # Yale et al. (2020): AA near 0.5 means real and synthetic rows are
+            # indistinguishable; AA near 0 means synthetic rows sit on real ones
+            # (copying) and near 1 means they are far apart. Score the distance
+            # from 0.5 so a copy of the training data no longer scores best.
             output =  [{'metric': 'nnaa', 'dim': 'u', 
                         'val': self.results['avg'], 
                         'err': self.results['err'], 
-                        'n_val': 1-self.results['avg'], 
-                        'n_err': self.results['err'], 
+                        'n_val': float(max(0.0, 1-2*abs(self.results['avg']-0.5))), 
+                        'n_err': 2*self.results['err'], 
                         }]
             if self.hout_data is not None:
                 output.extend([{'metric': 'priv_loss_nnaa', 'dim': 'p', 
