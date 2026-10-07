@@ -77,8 +77,13 @@ class EpsilonIdentifiability(MetricClass):
         real = np.asarray(self.real_data)
 
         no, x_dim = np.shape(real)
-        W = [_column_entropy(real[:, i]) for i in range(x_dim)]
-        W_adjust = 1/(np.array(W)+1e-16)
+        W = np.array([_column_entropy(real[:, i]) for i in range(x_dim)])
+        # Yoon et al. (2020) weight each column by 1/entropy. A column that is
+        # constant in the real data has zero entropy and carries no
+        # identifying information; 1/(0 + 1e-16) let it outweigh every other
+        # column, so it gets weight 0 instead.
+        W_adjust = np.zeros(x_dim)
+        W_adjust[W > 0] = 1/W[W > 0]
 
         in_dists = _knn_distance(self.real_data,self.real_data,self.cat_cols,1,self.nn_dist,W_adjust)[0]
         ext_distances = _knn_distance(self.real_data,self.synt_data,self.cat_cols,1,self.nn_dist,W_adjust)[0]
@@ -93,7 +98,9 @@ class EpsilonIdentifiability(MetricClass):
             ext_distances = _knn_distance(self.hout_data,self.synt_data,self.cat_cols,1,self.nn_dist,W_adjust)[0]
 
             R_Diff = ext_distances - in_dists
-            identifiability_value = np.sum(R_Diff < 0) / float(no)
+            # Share of holdout rows, so it is comparable with eps_risk (a share
+            # of train rows); dividing by the train size shrank it.
+            identifiability_value = np.sum(R_Diff < 0) / float(len(in_dists))
 
             self.results['priv_loss'] = float(self.results['eps_risk'] - identifiability_value)
 
