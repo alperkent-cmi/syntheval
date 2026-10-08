@@ -5,6 +5,7 @@
 import json
 import warnings
 
+import pandas as pd
 from pandas import DataFrame
 
 class AnalysisConfig:
@@ -34,7 +35,15 @@ class AnalysisConfig:
 
         self.target_types = {}
         for var in self.target_vars:
-            if dataset[var].dtype == "object" or dataset[var].dtype == "int":
+            # Compare dtype kinds, not ``dtype == "int"``: "int" means the platform
+            # C long, which is int32 on Windows with NumPy < 2, so an int64 target
+            # was typed numeric there and every classification/fairness metric failed.
+            if (
+                pd.api.types.is_object_dtype(dataset[var])
+                or pd.api.types.is_integer_dtype(dataset[var])
+                or pd.api.types.is_bool_dtype(dataset[var])
+                or isinstance(dataset[var].dtype, pd.CategoricalDtype)
+            ):
                 self.target_types[var] = len(dataset[var].unique())
             else:
                 self.target_types[var] = "num"
