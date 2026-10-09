@@ -75,7 +75,11 @@ class StatisticalParity(MetricClass):
                 "The predictions are not binary. Running the metric on the positive class."
             )
 
-        difference = preds[X[S] == 1].mean() - preds[X[S] == 0].mean()
+        in_group, out_group = preds[X[S] == 1], preds[X[S] == 0]
+        if len(in_group) == 0 or len(out_group) == 0:
+            # A fold without one of the groups has no parity gap to estimate.
+            return np.nan
+        difference = in_group.mean() - out_group.mean()
 
         # Return a Python float for stable doctest repr across NumPy versions.
         return float(difference if positive_pred == 1 else -difference)
@@ -145,12 +149,25 @@ class StatisticalParity(MetricClass):
                         X_test, protected_attribute, preds, positive_class
                     )
                 )
+            # Average the folds that contain both groups, as equal_opportunity
+            # does: one fold without a small group made the whole metric NaN.
+            valid = np.array(statistical_paraty_differences, dtype=float)
+            valid = valid[~np.isnan(valid)]
+            if valid.size == 0:
+                warn(
+                    f"SynthEval(stat parity): no fold contained both groups of "
+                    f"'{protected_attribute}' for '{target_var}'."
+                )
+                mean_difference, se_difference = np.nan, np.nan
+            else:
+                mean_difference = float(np.mean(valid))
+                se_difference = float(np.std(valid, ddof=1) / np.sqrt(valid.size)) if valid.size > 1 else 0.0
             target_var = target_var.replace(' ', '_').lower()
             result_rows.append({
                 "target_var": target_var,
                 "protected_attribute": protected_attribute,
-                "statistical_parity": float(np.mean(statistical_paraty_differences)),
-                "statistical_parity_se": float(np.std(statistical_paraty_differences, ddof=1) / np.sqrt(folds))
+                "statistical_parity": mean_difference,
+                "statistical_parity_se": se_difference
             })
 
         columns = ["target_var", "protected_attribute", "statistical_parity", "statistical_parity_se"]
