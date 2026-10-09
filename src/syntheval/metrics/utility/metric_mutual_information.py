@@ -70,6 +70,32 @@ def _pairwise_attributes_mutual_information(data):
             mat[j, i] = row[k]
     return pd.DataFrame(mat, columns=labs, index=labs)
 
+#: Real-data quantile bins per numerical column before computing NMI.
+_N_BINS = 10
+
+
+def _bin_numeric_columns(real, synt, num_cols, n_bins=_N_BINS):
+    """Discretize numerical columns on the real data's quantiles, same edges for both.
+
+    NMI treats every distinct value as its own label, so two continuous columns
+    (all values distinct) always have NMI 1 and their dependence was invisible:
+    breaking a 0.6 correlation left the metric unchanged. DataSynthesizer, the
+    cited reference, bins numerical attributes into histograms first; quantile
+    bins of the real data keep that and are robust to outliers. Values outside
+    the real range fall into the end bins; missing values stay missing.
+    """
+    real, synt = real.copy(), synt.copy()
+    for col in num_cols or []:
+        if col not in real.columns:
+            continue
+        edges = np.unique(np.nanquantile(real[col].astype(float), np.linspace(0, 1, n_bins + 1)))
+        inner = edges[1:-1]
+        for frame in (real, synt):
+            values = frame[col].astype(float)
+            frame[col] = np.where(values.isna(), np.nan, np.digitize(values, inner))
+    return real, synt
+
+
 class MutualInformation(MetricClass):
 
     def name() -> str:
@@ -98,8 +124,9 @@ class MutualInformation(MetricClass):
             >>> M.evaluate()
             {'mutual_inf_diff': 0.0, 'mi_mat_dims': 2}
         """
-        r_mi = _pairwise_attributes_mutual_information(self.real_data)
-        f_mi = _pairwise_attributes_mutual_information(self.synt_data)
+        real, synt = _bin_numeric_columns(self.real_data, self.synt_data, self.num_cols)
+        r_mi = _pairwise_attributes_mutual_information(real)
+        f_mi = _pairwise_attributes_mutual_information(synt)
 
         mi_mat = r_mi - f_mi
         if self.plot_figures: plot_matrix_heatmap(mi_mat,'Mutual information matrix difference', 'mi', axs_lim, axs_scale)

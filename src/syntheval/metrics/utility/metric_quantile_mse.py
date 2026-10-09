@@ -57,8 +57,11 @@ class QuantileMSE(MetricClass):
             qMSE_lst = []
             for category in self.real_data.columns:
 
-                if category in self.cat_cols and cat_mse:
-                    # Categorical data
+                if category in self.cat_cols:
+                    # Categorical columns have no quantiles; upstream binned them
+                    # as numbers when cat_mse was off, so an exact copy scored > 0.
+                    if not cat_mse:
+                        continue
                     real_items = self.real_data[category].unique()
 
                     synth_frac = np.array([np.sum(self.synt_data[category] == item) for item in real_items]) / len(self.synt_data)
@@ -66,14 +69,21 @@ class QuantileMSE(MetricClass):
 
                     qMSE_lst.append(np.mean((synth_frac - real_frac)**2))
                 else:
-                    # Numerical data
+                    # Numerical data: compare with the real share of the same bins.
+                    # With ties (rounded or discrete values) the quantile bins do not
+                    # each hold 1/num_quants of the real rows, so upstream's fixed
+                    # 1/num_quants target scored an exact copy above zero.
                     quantiles = np.quantile(self.real_data[category], np.linspace(0, 1, num_quants+1))
-                    bin_edges = quantiles.tolist()
+                    bin_edges = np.unique(quantiles)
+                    if len(bin_edges) < 2:  # constant column: one zero-width bin
+                        bin_edges = np.repeat(bin_edges, 2)
 
+                    real_hist, _ = np.histogram(self.real_data[category], bins=bin_edges)
                     synth_hist, _ = np.histogram(self.synt_data[category], bins=bin_edges)
+                    real_frac = real_hist / len(self.real_data)
                     synth_frac = synth_hist / len(self.synt_data)
 
-                    qMSE_lst.append(np.mean((synth_frac - 1/num_quants)**2))
+                    qMSE_lst.append(np.mean((synth_frac - real_frac)**2))
             
             self.results = {'avg qMSE': float(np.mean(qMSE_lst)), 
                             'qMSE err': float(np.std(qMSE_lst, ddof=1) / np.sqrt(len(qMSE_lst)))
