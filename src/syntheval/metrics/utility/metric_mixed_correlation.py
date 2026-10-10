@@ -35,7 +35,11 @@ def _cramers_V(var1,var2) :
     stat = chi2_contingency(crosstab)[0] # Keeping of the test statistic of the Chi2 test
     obs = np.sum(crosstab) # Number of observations
     mini = min(crosstab.shape)-1 # Take the minimum value between the columns and the rows of the cross table
-    return float((stat/(obs*mini+1e-16)))
+    # Cramer's V is the square root of phi^2 / min(r-1, c-1). Upstream (and the
+    # Kaggle snippet it credits) returned the ratio without the root, i.e. V^2,
+    # which shrinks moderate associations (V = 0.3 -> 0.09) next to the Pearson
+    # and correlation-ratio entries of the same matrix.
+    return float(np.sqrt(stat/(obs*mini+1e-16)))
 
 def _apply_mat(data,func,labs1,labs2):
     """Help function for constructing a matrix based on func accross labels 1 and 2

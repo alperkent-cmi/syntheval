@@ -178,18 +178,22 @@ class PredictionAUROCDifference(MetricClass):
             name2  p  0.0  0.0    0.0    0.0
         """
         rows = []
+        # n_val scores agreement with the real-data AUROC: 1 - |synthetic - real|.
+        # Upstream used tanh(2*diff + 1), which keeps rising when the synthetic
+        # data trains a *better* classifier than the real data, so a dataset
+        # with exaggerated class separation outranked one that matched.
         if self.results != {}:
             output = [{'metric': 'auroc', 'dim': 'u', 
                      'val': self.results['auroc_diff'],
                      'err': self.results.get('auroc_diff_err'),
-                     'n_val': np.tanh(2*self.results['auroc_diff']+1), 
+                     'n_val': 1-abs(self.results['auroc_diff']), 
                      'n_err': self.results.get('auroc_diff_err')
                      }]
             if self.full_output and len(self.results['auroc results']) > 1:
                 for index, row in self.results['auroc results'].iterrows():
                     output.append({'metric': 'auroc_'+row['target_var'], 'dim': 'u', 
                                 'val': row['auroc_diff'],
-                                'n_val': np.tanh(2*row['auroc_diff']+1), 
+                                'n_val': 1-abs(row['auroc_diff']), 
                                 })
             return output
         else: pass
