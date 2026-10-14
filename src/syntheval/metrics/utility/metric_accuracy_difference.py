@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from sklearn.utils import resample
 from sklearn.metrics import f1_score
+from sklearn.utils.class_weight import compute_sample_weight
 from sklearn.model_selection import StratifiedKFold
 
 from sklearn.ensemble import AdaBoostClassifier, RandomForestClassifier
@@ -95,8 +96,9 @@ def class_test(real_models, fake_models, real, fake, test, F1_type):
     res = []
     for r_mod_, f_mod_ in zip(real_models, fake_models):
         r_mod, f_mod = copy.copy(r_mod_), copy.copy(f_mod_)
-        r_mod.fit(real[0],real[1])
-        f_mod.fit(fake[0],fake[1])
+        # Balanced class weights, so an imbalanced target is not reduced to its majority class.
+        r_mod.fit(real[0],real[1],sample_weight=compute_sample_weight("balanced",real[1]))
+        f_mod.fit(fake[0],fake[1],sample_weight=compute_sample_weight("balanced",fake[1]))
 
         pred_real = r_mod.predict(test[0])
         pred_fake = f_mod.predict(test[0])

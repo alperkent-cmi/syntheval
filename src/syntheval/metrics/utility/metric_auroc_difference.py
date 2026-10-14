@@ -12,6 +12,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_curve, auc
 from sklearn.utils import resample
+from sklearn.utils.class_weight import compute_sample_weight
 
 class PredictionAUROCDifference(MetricClass):
     """The Metric Class is an abstract class that interfaces with 
@@ -108,8 +109,9 @@ class PredictionAUROCDifference(MetricClass):
                         real_x_sub, real_y_sub = real_x, real_y
                         fake_x_sub, fake_y_sub = fake_x, fake_y
                 
-                    model1.fit(real_x_sub, real_y_sub)
-                    model2.fit(fake_x_sub, fake_y_sub)
+                    # Balanced class weights, so an imbalanced target is not reduced to its majority class.
+                    model1.fit(real_x_sub, real_y_sub, sample_weight=compute_sample_weight("balanced", real_y_sub))
+                    model2.fit(fake_x_sub, fake_y_sub, sample_weight=compute_sample_weight("balanced", fake_y_sub))
                     y1_probs = model1.predict_proba(hout_x)[:, 1]
                     y2_probs = model2.predict_proba(hout_x)[:, 1]
                 

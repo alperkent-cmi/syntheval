@@ -12,6 +12,7 @@ from syntheval.utils.plot_metrics import plot_feature_importance_comparison
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.utils.class_weight import compute_sample_weight
 
 class FeatureImportanceOverlap(MetricClass):
     """ Feature ranking metric. This metric compares feature importances and top k features ranking 
@@ -95,7 +96,9 @@ class FeatureImportanceOverlap(MetricClass):
                         model_real = DecisionTreeClassifier(random_state=42)
                         model_fake = DecisionTreeClassifier(random_state=42)
 
-                model_real.fit(real_x, real_y); model_fake.fit(fake_x, fake_y)
+                # Balanced class weights, so an imbalanced target is not reduced to its majority class.
+                model_real.fit(real_x, real_y, sample_weight=compute_sample_weight("balanced", real_y))
+                model_fake.fit(fake_x, fake_y, sample_weight=compute_sample_weight("balanced", fake_y))
 
                 importances_real = model_real.feature_importances_
                 importances_real = pd.Series(importances_real, index=real_x.columns).sort_values(ascending=False)

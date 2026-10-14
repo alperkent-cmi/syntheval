@@ -10,6 +10,7 @@ from warnings import warn
 from itertools import product
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import KFold
+from sklearn.utils.class_weight import compute_sample_weight
 
 from syntheval.metrics.core.metric import MetricClass
 
@@ -142,7 +143,8 @@ class StatisticalParity(MetricClass):
 
                 # Train a classifier
                 clf = RandomForestClassifier(n_estimators=100)
-                clf.fit(X_train, y_train)
+                # Balanced class weights, so an imbalanced target is not reduced to its majority class.
+                clf.fit(X_train, y_train, sample_weight=compute_sample_weight("balanced", y_train))
                 preds = clf.predict(X_test)
                 statistical_paraty_differences.append(
                     self.statistical_parity(
