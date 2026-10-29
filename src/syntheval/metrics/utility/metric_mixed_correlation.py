@@ -107,7 +107,7 @@ def _correlation_ratio(categories, measurements):
     
     Example:
         >>> _correlation_ratio(np.array([0,1,0,1]),np.array([1,2,3,4]))
-        0.2
+        0.447...
     """
     fcat, _ = pd.factorize(categories)
     cat_num = np.max(fcat)+1
@@ -120,10 +120,13 @@ def _correlation_ratio(categories, measurements):
     y_total_avg = np.sum(np.multiply(y_avg_array,n_array))/np.sum(n_array)
     numerator = np.sum(np.multiply(n_array,np.power(np.subtract(y_avg_array,y_total_avg),2)))
     denominator = np.sum(np.power(np.subtract(measurements,y_total_avg),2))
+    # The correlation ratio is eta = sqrt(between / total variance). Upstream
+    # returned eta^2 next to unsquared Pearson and Cramer's V entries, which
+    # shrank categorical-numerical associations (0.3 -> 0.09).
     if numerator == 0:
         eta = 0.0
     else:
-        eta = numerator/denominator
+        eta = np.sqrt(numerator/denominator)
     return float(eta)
 
 def mixed_correlation(data,num_cols,cat_cols):
@@ -155,6 +158,22 @@ def mixed_correlation(data,num_cols,cat_cols):
         bot_row = pd.concat([corr_cat_num.transpose(),corr_num_num],axis=1)
         corr = pd.concat([top_row,bot_row],axis=0)
     return corr + np.diag(1-np.diag(corr))
+
+def _corr_difference(r_corr, f_corr):
+    """Real minus synthetic association matrix. A Pearson correlation is
+    undefined (NaN) for a constant column; a constant column has no
+    association with anything, so it counts as 0. Upstream let the NaN reach
+    the Frobenius norm, so one constant column made the whole metric NaN.
+
+    Example:
+        >>> r = pd.DataFrame([[1.0, 0.5], [0.5, 1.0]], columns=['a','b'], index=['a','b'])
+        >>> f = pd.DataFrame([[1.0, np.nan], [np.nan, 1.0]], columns=['a','b'], index=['a','b'])
+        >>> _corr_difference(r, f).loc['a','b']
+        0.5
+    """
+    diff = r_corr.fillna(0).to_numpy(copy=True) - f_corr.fillna(0).to_numpy(copy=True)
+    np.fill_diagonal(diff, 0.0)  # a column's association with itself is 1 on both sides
+    return pd.DataFrame(diff, index=r_corr.index, columns=r_corr.columns)
 
 class MixedCorrelation(MetricClass):
     """The Metric Class is an abstract class that interfaces with 
@@ -205,12 +224,12 @@ class MixedCorrelation(MetricClass):
         if mixed_corr:
             r_corr = mixed_correlation(self.real_data,self.num_cols,self.cat_cols)
             f_corr = mixed_correlation(self.synt_data,self.num_cols,self.cat_cols)
-            corr_mat = r_corr-f_corr
+            corr_mat = _corr_difference(r_corr, f_corr)
             if self.plot_figures: plot_matrix_heatmap(corr_mat,'Mixed correlation matrix difference', 'corr', axs_lim, axs_scale)
         else:
             r_corr = self.real_data[self.num_cols].corr()
             f_corr = self.synt_data[self.num_cols].corr()
-            corr_mat = r_corr-f_corr
+            corr_mat = _corr_difference(r_corr, f_corr)
             if self.plot_figures: plot_matrix_heatmap(corr_mat,'Correlation matrix difference (nums only)', 'corr', axs_lim, axs_scale)
         
         self.results = {'corr_mat_diff': float(np.linalg.norm(corr_mat,ord='fro')), 'corr_mat_dims': len(corr_mat)}

@@ -53,7 +53,7 @@ class MIAClassifier(MetricClass):
             >>> hout = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
             >>> M = MIAClassifier(real, fake, hout, cat_cols=[], num_cols=[], do_preprocessing=False)
             >>> M.evaluate(num_eval_iter=1) # doctest: +ELLIPSIS
-            {'MIA precision': 0.0, 'MIA precision se': nan, 'MIA recall': 0.0, 'MIA recall se': nan, 'MIA macro F1': 0.33..., 'MIA macro F1 se': nan}
+            {'MIA precision': 0.5, 'MIA precision se': nan, 'MIA recall': 0.0, 'MIA recall se': nan, 'MIA macro F1': 0.33..., 'MIA macro F1 se': nan}
         """
         try:
             assert self.hout_data is not None
@@ -123,8 +123,15 @@ class MIAClassifier(MetricClass):
                 holdout_predictions = cls.predict(X_test)
 
                 # Calculate precision, recall, and F1-score
+                # An attacker that flags no record has no evidence either way:
+                # its precision is the base rate of members in the test set
+                # (0.5), not 0. Upstream's 0 was then scored as the worst
+                # privacy (1 - 2|0.5 - 0|), so a generator whose rows look
+                # unlike every real row was penalised for the attacker's
+                # silence.
                 pre_results["precision"].append(
                     precision_score(y_test, holdout_predictions, zero_division=0)
+                    if holdout_predictions.sum() > 0 else float(np.mean(y_test))
                 )
                 pre_results["recall"].append(recall_score(y_test, holdout_predictions, zero_division=0))
                 pre_results["f1"].append(
@@ -207,7 +214,11 @@ class MIAClassifier(MetricClass):
                     "dim": "p",
                     "val": self.results["MIA precision"],
                     "err": self.results["MIA precision se"],
-                    "n_val": 1-2*abs(0.5 - self.results["MIA precision"]),
+                    # One-sided: only precision above the 0.5 base rate is
+                    # membership evidence. Upstream folded |0.5 - p|, so an
+                    # attacker that was mostly wrong (p = 0.1) scored as a
+                    # privacy risk.
+                    "n_val": 1-2*max(0.0, self.results["MIA precision"] - 0.5),
                     "n_err": self.results["MIA precision se"],
                 }]
         else: pass

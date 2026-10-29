@@ -63,6 +63,13 @@ class PropensityMeanSquaredError(MetricClass):
 
         if len(self.num_cols) > 0:
             Df[self.num_cols] = StandardScaler().fit_transform(Df[self.num_cols])
+        # Nominal columns enter the logistic model as one indicator per
+        # category. Upstream fed the label codes as numbers, so the model only
+        # saw a change in the mean code: a synthetic column that dropped its
+        # middle category and kept the mean scored like a fresh draw.
+        cat_cols = [c for c in (self.cat_cols or []) if c in Df.columns and c != 'real']
+        if len(cat_cols) > 0:
+            Df = pd.get_dummies(Df, columns=cat_cols, dtype=float)
         Xs, ys = Df.drop(['real'], axis=1), Df['real']
 
         ### Run 5-fold cross-validation
